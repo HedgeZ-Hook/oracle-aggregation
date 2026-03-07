@@ -1,47 +1,53 @@
-# 🌐 Multi-Chain Oracle Price Aggregator
+# Reactive Perp Liquidator & Cross-Chain Oracle
 
-_(Powered by Reactive Network)_
+## Overview
 
-## 📖 Overview
-
-The **Multi-Chain Oracle Price Aggregator** is a next-generation, fully on-chain decentralized price feed system. Traditional oracles rely heavily on off-chain components (like keeper bots or centralized servers) to fetch, calculate, and push data to the blockchain.
-
-This project completely eliminates off-chain dependencies by utilizing the **Reactive Network**. It acts as an autonomous, cross-chain hub that actively listens to decentralized exchanges (DEXs) across multiple blockchains, aggregates the pricing data in real-time, and securely delivers a unified price to a destination smart contract.
+The **Reactive Perp Liquidator** is a next-generation, fully on-chain automation engine designed for Perpetual Futures protocols. Traditional perpetual DEXs rely heavily on off-chain "Keeper Bots" to monitor user positions and trigger liquidations when collateral ratios drop.
+This project eliminates the need for centralized keeper infrastructure. By leveraging the **Reactive Network**, this system autonomously aggregates cross-chain index prices for perpetual assets (sourcing from Chainlink, Pyth, and Uniswap V3/V4 hooks) while concurrently monitoring user position states on **Unichain**. The moment an aggregated price moves against a user's position and breaches the liquidation threshold, the Reactive contract instantly fires a cross-chain execution to liquidate the user directly within the Unichain `vamm-perp-hook`.
 
 ---
 
-## 🏗 System Architecture
+## System Architecture
 
-The architecture is designed to be trustless, event-driven, and highly resilient against localized market manipulation. It operates through three distinct layers:
+The architecture is designed to be trustless, event-driven, and highly resilient. It operates through four interconnected layers:
 
-### 1. The Data Source Layer (Origin Chains)
+### 1. The Price Discovery Layer (Cross-Chain Oracles)
 
-This layer consists of the actual decentralized markets where trading happens.
+This layer provides the raw, real-time pricing data for the assets being traded on the perpetual exchange.
 
-- **Target:** High-liquidity AMM pools (e.g., Uniswap V3/V4) on various networks like Ethereum Mainnet, Arbitrum, Optimism, and Base.
-- **Mechanism:** Every time a trade occurs in these pools, the smart contracts emit on-chain events (such as `Swap` events) that contain the latest tick or price data.
-- **Role:** These disparate pools act as independent, raw data providers.
+- **Sources:** Chainlink `AnswerUpdated` events, Pyth Network price feeds, and Uniswap V3/V4 `Swap` events (or specific V4 hooks).
+- **Networks:** Spread across multiple blockchains (Ethereum, Arbitrum, Optimism, etc.) to ensure robust, manipulation-resistant index pricing.
+- **Role:** Continuously emits on-chain price updates that represent the true global market value of the perpetual assets.
 
-### 2. The Aggregation Hub (Reactive Network)
+### 2. The State Monitoring Layer (Unichain Positions)
 
-This is the core engine of the system, deployed entirely on the Reactive Network. It operates without any human or bot intervention.
+This layer tracks the financial health of the traders.
 
-- **Event Subscription:** The hub is configured to "listen" concurrently to the specific `Swap` events from the pools defined in the Source Layer.
-- **Data Processing:** When a relevant event is detected, the Reactive Virtual Machine (RVM) automatically spins up. It catches the emitted price data (e.g., the current tick) and buffers it.
-- **Consensus & Aggregation:** The hub takes the latest price points from all monitored chains and applies an aggregation algorithm (such as calculating the Median or a Time-Weighted Average Price - TWAP). This neutralizes anomalies or flash-loan manipulations that might occur on a single isolated chain.
+- **Target:** The `vamm-perp-hook` deployed on **Unichain**.
+- **Mechanism:** Whenever a user opens, modifies, or closes a leveraged position, the hook emits specific state events (e.g., `PositionOpened`, `MarginUpdated`).
+- **Role:** Provides the Reactive Network with the exact entry prices, leverage, and margin balances of all active traders.
 
-### 3. The Consumer Layer (Destination Chain)
+### 3. The Reactive Engine (The Hub)
 
-This is where the final, sanitized data is utilized.
+Deployed entirely on the Reactive Network, this is the "brain" of the operation. It requires no human intervention or off-chain servers.
 
-- **Target:** A specific destination network where your DeFi applications (Lending protocols, Derivatives, Synthetic assets) reside.
-- **Mechanism:** Once the hub calculates a new valid aggregated price, it triggers a cross-chain **Callback**.
-- **Role:** The callback pushes the finalized price directly into a designated Consumer Oracle Smart Contract on the destination chain, making it immediately available for dApps to read and execute logic against.
+- **Dual-Subscription:** It subscribes to _both_ the Price Discovery events (Layer 1) and the Position State events (Layer 2).
+- **Data Processing & Aggregation:** It aggregates the incoming prices from Chainlink, Pyth, and Uniswap to form a secure "Mark Price". Simultaneously, it maintains a real-time internal ledger of user positions.
+- **Health Evaluation:** Upon every price update, the Reactive Virtual Machine (RVM) calculates the Health Factor of the tracked positions.
+
+### 4. The Execution Layer (Automated Liquidation)
+
+This is where the autonomous action takes place.
+
+- **Trigger:** If the hub detects that a user's Health Factor has dropped below the maintenance margin requirement (Health Factor < 1.0), it immediately halts further monitoring for that user.
+- **Callback Execution:** The hub crafts a payload and triggers a cross-chain callback targeted at the `vamm-perp-hook` on Unichain.
+- **Result:** The callback calls the `liquidatePosition(address user)` function on the hook, successfully closing the underwater position, protecting the protocol from bad debt, and earning the liquidation bounty for the contract.
 
 ---
 
-## ✨ Key Advantages
+## Key Advantages
 
-- **True Multi-Chain Consensus:** By sourcing liquidity and pricing data from multiple isolated networks into a single computational hub, the system reflects the true global market price of an asset.
-- **100% Botless Automation:** Eliminates the Single Point of Failure (SPOF) associated with Web2 infrastructure. There are no cronjobs, keeper bots, or external servers to maintain or trust.
-- **Manipulation Resistance:** An attacker would need to simultaneously manipulate highly liquid pools across multiple different blockchains to significantly alter the aggregated price, making economic exploits virtually impossible.
+- **Zero-Bot Infrastructure:** Replaces unreliable, gas-war-prone Web2 keeper bots with a deterministic, protocol-level automation network.
+- **Manipulation-Proof Indexing:** By aggregating prices cross-chain from premium oracles (Chainlink/Pyth) and deep liquidity DEXs (Uni V3/V4), the system prevents localized flash-loan attacks from causing unfair liquidations.
+- **Instantaneous Reaction:** The moment a price update event pushes a position into bankruptcy territory, the liquidation callback is fired in the very next available execution cycle.
+- **De-Risking the Protocol:** Ensures the perpetual exchange remains solvent without relying on third-party liquidators to be online during periods of extreme network congestion.
