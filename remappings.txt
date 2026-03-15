@@ -1,0 +1,5 @@
+forge-std/=lib/forge-std/src/
+@reactive/=lib/reactive-lib/src/
+@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/
+v4-core/=lib/v4-core/src/
+solmate/=lib/v4-core/lib/solmate/src/
