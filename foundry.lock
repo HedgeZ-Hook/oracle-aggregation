@@ -17,13 +17,10 @@
       "rev": "d664678a7d86204c9391af4cedfd5ae0b0b904e4"
     }
   },
-  "lib/uniswap-v4-core": {
-    "rev": "e50237c43811bd9b526eff40f26772152a42daba"
+  "lib/v3-core": {
+    "rev": "d8b1c635c275d2a9450bd6a78f3fa2484fef73eb"
   },
   "lib/v4-core": {
-    "tag": {
-      "name": "v4.0.0",
-      "rev": "e50237c43811bd9b526eff40f26772152a42daba"
-    }
+    "rev": "e50237c43811bd9b526eff40f26772152a42daba"
   }
 }

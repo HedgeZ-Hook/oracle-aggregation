@@ -1,28 +1,30 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 pragma solidity >=0.8.0;
 
-import {FullMath} from "v4-core/libraries/FullMath.sol";
-import {TickMath} from "v4-core/libraries/TickMath.sol";
+library TickCumulativeOracleLib {
+    uint16 internal constant MAX_OBSERVATION = 65535;
 
-import {BlockContext} from "../libraries/BlockContext.sol";
-
-contract TickCumulativeTwap is BlockContext {
     struct Observation {
         int24 tick;
         int256 tickCumulative;
         uint256 timestamp;
     }
 
-    uint16 public currentObservationIndex;
-    uint16 internal constant MAX_OBSERVATION = 1800;
-    Observation[MAX_OBSERVATION] public observations;
+    struct State {
+        uint16 currentObservationIndex;
+        Observation[MAX_OBSERVATION] observations;
+    }
 
-    function _updateTick(
+    function update(
+        State storage self,
         int24 tick,
         uint256 lastUpdatedTimestamp
     ) internal returns (bool) {
-        if (currentObservationIndex == 0 && observations[0].timestamp == 0) {
-            observations[0] = Observation({
+        if (
+            self.currentObservationIndex == 0 &&
+            self.observations[0].timestamp == 0
+        ) {
+            self.observations[0] = Observation({
                 tick: tick,
                 tickCumulative: 0,
                 timestamp: lastUpdatedTimestamp
@@ -30,8 +32,8 @@ contract TickCumulativeTwap is BlockContext {
             return true;
         }
 
-        Observation memory lastObservation = observations[
-            currentObservationIndex
+        Observation memory lastObservation = self.observations[
+            self.currentObservationIndex
         ];
         require(lastUpdatedTimestamp >= lastObservation.timestamp, "TCT_IT");
 
@@ -43,45 +45,47 @@ contract TickCumulativeTwap is BlockContext {
             return false;
         }
 
-        currentObservationIndex =
-            (currentObservationIndex + 1) %
+        self.currentObservationIndex =
+            (self.currentObservationIndex + 1) %
             MAX_OBSERVATION;
 
         uint256 timestampDiff = lastUpdatedTimestamp -
             lastObservation.timestamp;
-        observations[currentObservationIndex] = Observation({
+        self.observations[self.currentObservationIndex] = Observation({
+            tick: tick,
             tickCumulative: lastObservation.tickCumulative +
                 (int256(lastObservation.tick) * int256(timestampDiff)),
-            timestamp: lastUpdatedTimestamp,
-            tick: tick
+            timestamp: lastUpdatedTimestamp
         });
         return true;
     }
 
-    function _calculateAverageTick(
+    function calculateAverageTick(
+        State storage self,
         uint256 interval,
         int24 tick,
-        uint256 latestUpdatedTimestamp
+        uint256 latestUpdatedTimestamp,
+        uint256 currentTimestamp
     ) internal view returns (int24 averageTick, bool hasTwap) {
         if (
-            (currentObservationIndex == 0 && observations[0].timestamp == 0) ||
-            interval == 0
+            (self.currentObservationIndex == 0 &&
+                self.observations[0].timestamp == 0) || interval == 0
         ) {
             return (0, false);
         }
 
-        Observation memory latestObservation = observations[
-            currentObservationIndex
+        Observation memory latestObservation = self.observations[
+            self.currentObservationIndex
         ];
 
         if (latestObservation.timestamp == latestUpdatedTimestamp) {
             require(tick == latestObservation.tick, "TCT_ITWCT");
         }
 
-        uint256 currentTimestamp = _blockTimestamp();
         if (currentTimestamp < interval) {
             return (0, false);
         }
+
         uint256 targetTimestamp = currentTimestamp - interval;
         int256 currentTickCumulative = latestObservation.tickCumulative +
             (int256(latestObservation.tick) *
@@ -91,9 +95,9 @@ contract TickCumulativeTwap is BlockContext {
         (
             Observation memory beforeOrAt,
             Observation memory atOrAfter
-        ) = _getSurroundingObservations(targetTimestamp);
-        int256 targetTickCumulative;
+        ) = getSurroundingObservations(self, targetTimestamp);
 
+        int256 targetTickCumulative;
         if (targetTimestamp == beforeOrAt.timestamp) {
             targetTickCumulative = beforeOrAt.tickCumulative;
         } else if (atOrAfter.timestamp == targetTimestamp) {
@@ -129,98 +133,56 @@ contract TickCumulativeTwap is BlockContext {
         hasTwap = true;
     }
 
-    function _calculatePriceTwap(
-        uint256 interval,
-        int24 tick,
-        uint256 latestUpdatedTimestamp,
-        uint8 baseDecimals,
-        uint8 quoteDecimals
-    ) internal view returns (uint256 priceE18, bool hasTwap) {
-        (int24 averageTick, bool ready) = _calculateAverageTick(
-            interval,
-            tick,
-            latestUpdatedTimestamp
-        );
-        if (!ready) {
-            return (0, false);
-        }
-
-        return (_priceAtTick(averageTick, baseDecimals, quoteDecimals), true);
-    }
-
-    function _priceAtTick(
-        int24 tick,
-        uint8 baseDecimals,
-        uint8 quoteDecimals
-    ) internal pure returns (uint256) {
-        uint160 sqrtPriceX96 = TickMath.getSqrtPriceAtTick(tick);
-        uint256 ratioX128 = FullMath.mulDiv(
-            uint256(sqrtPriceX96),
-            uint256(sqrtPriceX96),
-            uint256(1) << 64
-        );
-        return
-            FullMath.mulDiv(
-                ratioX128,
-                (10 ** baseDecimals) * 1e18,
-                (uint256(1) << 128) * (10 ** quoteDecimals)
-            );
-    }
-
-    function _inverseTick(int24 tick) internal pure returns (int24) {
-        return -tick;
-    }
-
-    function _getSurroundingObservations(
+    function getSurroundingObservations(
+        State storage self,
         uint256 targetTimestamp
     )
         internal
         view
         returns (Observation memory beforeOrAt, Observation memory atOrAfter)
     {
-        beforeOrAt = observations[currentObservationIndex];
+        beforeOrAt = self.observations[self.currentObservationIndex];
 
-        if (
-            observations[currentObservationIndex].timestamp <= targetTimestamp
-        ) {
+        if (beforeOrAt.timestamp <= targetTimestamp) {
             return (beforeOrAt, atOrAfter);
         }
 
-        beforeOrAt = observations[
-            (currentObservationIndex + 1) % MAX_OBSERVATION
+        beforeOrAt = self.observations[
+            (self.currentObservationIndex + 1) % MAX_OBSERVATION
         ];
         if (beforeOrAt.timestamp == 0) {
-            beforeOrAt = observations[0];
+            beforeOrAt = self.observations[0];
         }
 
         if (beforeOrAt.timestamp > targetTimestamp) {
             return (beforeOrAt, beforeOrAt);
         }
 
-        return _binarySearch(targetTimestamp);
+        return binarySearch(self, targetTimestamp);
     }
 
-    function _binarySearch(
+    function binarySearch(
+        State storage self,
         uint256 targetTimestamp
     )
-        private
+        internal
         view
         returns (Observation memory beforeOrAt, Observation memory atOrAfter)
     {
-        uint256 l = (currentObservationIndex + 1) % MAX_OBSERVATION;
+        uint256 l = (self.currentObservationIndex + 1) % MAX_OBSERVATION;
         uint256 r = l + MAX_OBSERVATION - 1;
         uint256 i;
 
         while (true) {
             i = (l + r) / 2;
-            beforeOrAt = observations[i % MAX_OBSERVATION];
+            beforeOrAt = self.observations[i % MAX_OBSERVATION];
 
             if (beforeOrAt.timestamp == 0) {
                 l = i + 1;
                 continue;
             }
 
-            atOrAfter = observations[(i + 1) % MAX_OBSERVATION];
+            atOrAfter = self.observations[(i + 1) % MAX_OBSERVATION];
 
             bool targetAtOrAfter = beforeOrAt.timestamp <= targetTimestamp;
             if (targetAtOrAfter && targetTimestamp <= atOrAfter.timestamp) {
