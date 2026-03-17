@@ -1,131 +1,279 @@
-# Reactive Perp Liquidator & Cross-Chain Oracle
+# Oracle Aggregation
 
-## Overview
+Event-driven oracle aggregation and liquidation automation built for the Reactive Network.
 
-The **Reactive Perp Liquidator** is a next-generation, fully on-chain automation engine designed for Perpetual Futures protocols. Traditional perpetual DEXs rely heavily on off-chain "Keeper Bots" to monitor user positions and trigger liquidations when collateral ratios drop.
-This project eliminates the need for centralized keeper infrastructure. By leveraging the **Reactive Network**, this system autonomously aggregates cross-chain index prices for perpetual assets (sourcing from Chainlink, Pyth, and Uniswap V3/V4 hooks) while concurrently monitoring user position states on **Unichain**. The moment an aggregated price moves against a user's position and breaches the liquidation threshold, the Reactive contract instantly fires a cross-chain execution to liquidate the user directly within the Unichain `vamm-perp-hook`.
+The current codebase focuses on:
 
----
+- a V3-only price aggregator that listens to Uniswap V3 `Swap` events across chains
+- a liquidation monitor that tracks trader liquidation thresholds
+- a destination callback that updates the destination oracle and triggers liquidation callbacks
 
-## System Architecture
+## Architecture
 
-The architecture is designed to be trustless, event-driven, and highly resilient. It operates through four interconnected layers:
+```text
++------------------------------------------------------------+
+| Uniswap V3 Pools                                           |
+| Ethereum / Base / ...                                      |
+| Event: Swap(address,address,int256,int256,uint160,uint128,int24) |
++------------------------------------------------------------+
+                             |
+                             v
++------------------------------------------------------------+
+| PriceAggregationReactive                                   |
+| - normalize per-pool tick direction                        |
+| - maintain per-pool tick cumulative                        |
+| - compute weighted aggregate price                         |
++------------------------------------------------------------+
+                             |
+                             | Callback: onAggregatedPrice(address,uint256,uint256)
+                             v
++------------------------------------------------------------+
+| LiquidationMonitorReactive                                 |
+| - track trader liquidation thresholds                      |
+| - compare liquidationPrice vs aggregate price              |
+| - emit destination callbacks                               |
++------------------------------------------------------------+
+             ^                                       |
+             |                                       |
+             | LiquidationPriceChange(address,uint256,bool)
+             |                                       | Callback: updateOraclePrice(uint256)
++-------------------------------+                    | Callback: liquidate(address)
+| Trader Source Contract        |                    v
++-------------------------------+  +--------------------------------------------------+
+                                  | LiquidationDestinationCallback                    |
+                                  | - update destination oracle                      |
+                                  | - call destination clearing house liquidation    |
+                                  +--------------------------------------------------+
+```
 
-### 1. The Price Discovery Layer (Cross-Chain Oracles)
+```mermaid
+flowchart TD
+    A[Uniswap V3 Pools<br/>Swap events] --> B[PriceAggregationReactive]
+    T[Trader Source Contract<br/>LiquidationPriceChange] --> C[LiquidationMonitorReactive]
+    B -->|onAggregatedPrice| C
+    C -->|updateOraclePrice| D[LiquidationDestinationCallback]
+    C -->|liquidate| D
+    D --> E[Destination Oracle]
+    D --> F[Destination Clearing House]
+```
 
-This layer provides the raw, real-time pricing data for the assets being traded on the perpetual exchange.
+## Contracts
 
-- **Sources:** Chainlink `AnswerUpdated` events, Pyth Network price feeds, and Uniswap V3/V4 `Swap` events (or specific V4 hooks).
-- **Networks:** Spread across multiple blockchains (Ethereum, Arbitrum, Optimism, etc.) to ensure robust, manipulation-resistant index pricing.
-- **Role:** Continuously emits on-chain price updates that represent the true global market value of the perpetual assets.
+### `PriceAggregationReactive`
 
-### 2. The State Monitoring Layer (Unichain Positions)
+File: [src/PriceAggregationReactive.sol](/Users/perfogic/Workspace/Evm/oracle-aggregation/src/PriceAggregationReactive.sol)
 
-This layer tracks the financial health of the traders.
+Responsibilities:
 
-- **Target:** The `vamm-perp-hook` deployed on **Unichain**.
-- **Mechanism:** Whenever a user opens, modifies, or closes a leveraged position, the hook emits specific state events (e.g., `PositionOpened`, `MarginUpdated`).
-- **Role:** Provides the Reactive Network with the exact entry prices, leverage, and margin balances of all active traders.
+- subscribes to multiple Uniswap V3 pools
+- normalizes each pool into a common price direction using:
+  - `token0Decimals`
+  - `token1Decimals`
+  - `useQuoteAsBase`
+- maintains per-pool `tick cumulative`
+- computes weighted aggregate price across active pools
+- emits a callback when the aggregate price changes
 
-### 3. The Reactive Engine (The Hub)
+Notes:
 
-Deployed entirely on the Reactive Network, this is the "brain" of the operation. It requires no human intervention or off-chain servers.
+- `activePools` means a pool has started producing data
+- `ready` means every configured pool has enough history for the configured TWAP interval
+- timestamps are taken from the Reactive execution environment, not from the source chain block timestamp
 
-- **Dual-Subscription:** It subscribes to _both_ the Price Discovery events (Layer 1) and the Position State events (Layer 2).
-- **Data Processing & Aggregation:** It aggregates the incoming prices from Chainlink, Pyth, and Uniswap to form a secure "Mark Price". Simultaneously, it maintains a real-time internal ledger of user positions.
-- **Health Evaluation:** Upon every price update, the Reactive Virtual Machine (RVM) calculates the Health Factor of the tracked positions.
+### `LiquidationMonitorReactive`
 
-### 4. The Execution Layer (Automated Liquidation)
+File: [src/LiquidationMonitorReactive.sol](/Users/perfogic/Workspace/Evm/oracle-aggregation/src/LiquidationMonitorReactive.sol)
 
-This is where the autonomous action takes place.
+Responsibilities:
 
-- **Trigger:** If the hub detects that a user's Health Factor has dropped below the maintenance margin requirement (Health Factor < 1.0), it immediately halts further monitoring for that user.
-- **Callback Execution:** The hub crafts a payload and triggers a cross-chain callback targeted at the `vamm-perp-hook` on Unichain.
-- **Result:** The callback calls the `liquidatePosition(address user)` function on the hook, successfully closing the underwater position, protecting the protocol from bad debt, and earning the liquidation bounty for the contract.
+- subscribes to `LiquidationPriceChange(address,uint256,bool)` from the trader source contract
+- stores trader liquidation thresholds
+- receives aggregate price updates from `PriceAggregationReactive`
+- emits destination callbacks for:
+  - `updateOraclePrice(uint256)`
+  - `liquidate(address)`
+- removes a trader when the source emits:
+  - `LiquidationPriceChange(trader, 0, true)`
 
----
+Semantics:
 
-## Key Advantages
+- liquidation is requested when `liquidationPriceE18 > currentPriceE18`
+- `sourceContract` and `priceAggregationContract` are intentionally different trust boundaries:
+  - `sourceContract` emits trader threshold updates
+  - `priceAggregationContract` is the only contract allowed to call `onAggregatedPrice(...)`
 
-- **Zero-Bot Infrastructure:** Replaces unreliable, gas-war-prone Web2 keeper bots with a deterministic, protocol-level automation network.
-- **Manipulation-Proof Indexing:** By aggregating prices cross-chain from premium oracles (Chainlink/Pyth) and deep liquidity DEXs (Uni V3/V4), the system prevents localized flash-loan attacks from causing unfair liquidations.
-- **Instantaneous Reaction:** The moment a price update event pushes a position into bankruptcy territory, the liquidation callback is fired in the very next available execution cycle.
-- **De-Risking the Protocol:** Ensures the perpetual exchange remains solvent without relying on third-party liquidators to be online during periods of extreme network congestion.
+### `LiquidationDestinationCallback`
 
-## Hardhat
+File: [src/LiquidationDestinationCallback.sol](/Users/perfogic/Workspace/Evm/oracle-aggregation/src/LiquidationDestinationCallback.sol)
 
-The repo now uses **Hardhat 3 + TypeScript + `@nomicfoundation/hardhat-foundry`** so Hardhat reads Foundry remappings and `lib/` dependencies without a custom remapping shim.
+Responsibilities:
 
-The repo now supports Hardhat alongside Foundry.
+- receives authorized callbacks from the Reactive side
+- forwards `updateOraclePrice(uint256)` to the destination oracle
+- forwards `liquidate(address)` to the destination clearing house
 
-### Install
+## Price Model
+
+The aggregator stores `tick cumulative`, not direct price cumulative.
+
+Per pool:
+
+- Uniswap V3 `Swap` events provide the latest `tick`
+- the contract accumulates `tick * dt`
+- a TWAP tick is derived over the configured interval
+- that tick is converted into a normalized `priceE18`
+
+For aggregation:
+
+- only initialized pools are included in the aggregate
+- weights come from `PoolConfig.weight`
+- if some pools are active but not yet warm enough for the interval, the contract still returns a price using fallback latest-tick semantics, while `ready` stays `false`
+
+## Current Deployment Defaults
+
+The Hardhat deploy script for the aggregator is preloaded with two pools:
+
+- Ethereum mainnet pool
+  - `sourceChainId = 1`
+  - `pool = 0x4e68Ccd3E89f51C3074ca5072bbAC773960dFa36`
+  - `token0Decimals = 18`
+  - `token1Decimals = 6`
+  - `useQuoteAsBase = false`
+  - `weight = 50`
+- Base pool
+  - `sourceChainId = 8453`
+  - `pool = 0x6c561B446416E1A00E8E93E221854d6eA4171372`
+  - `token0Decimals = 18`
+  - `token1Decimals = 6`
+  - `useQuoteAsBase = false`
+  - `weight = 50`
+
+Mainnet and testnet network params in the current Hardhat config:
+
+- Reactive Mainnet
+  - RPC: `https://mainnet-rpc.rnk.dev/`
+  - Chain ID: `1597`
+  - Explorer: `https://reactscan.net/`
+- Reactive Lasna
+  - RPC: `https://lasna-rpc.rnk.dev/`
+  - Chain ID: `5318007`
+  - Explorer: `https://lasna.reactscan.net`
+
+## Tooling
+
+This repo uses:
+
+- Foundry for Solidity testing
+- Hardhat 3 + TypeScript for deployment scripting
+- `@nomicfoundation/hardhat-foundry` so Hardhat can resolve Foundry-style remappings and `lib/` dependencies
+
+## Install
 
 ```bash
+forge --version
 npm install
 ```
 
-### Compile
+## Test
+
+Foundry is the primary test runner.
 
 ```bash
-npm run compile
+forge test
 ```
 
-### Smoke test
+Useful targeted test runs:
 
 ```bash
-npm run test:hardhat
+forge test --match-path test/PriceAggregationReactive.t.sol
+forge test --match-path test/FullFlow.t.sol
 ```
+
+Hardhat compile is also wired up and useful for deploy-script validation:
+
+```bash
+npx hardhat compile
+```
+
+## Deploy
 
 ### Deploy `PriceAggregationReactive`
 
-The deploy script is preloaded with these two V3 pools:
+Script: [scripts/deploy-price-aggregation.ts](/Users/perfogic/Workspace/Evm/oracle-aggregation/scripts/deploy-price-aggregation.ts)
 
-- `0x4e68Ccd3E89f51C3074ca5072bbAC773960dFa36` on Ethereum mainnet (`sourceChainId = 1`)
-- `0x6c561B446416E1A00E8E93E221854d6eA4171372` on Base (`sourceChainId = 8453`)
-
-Both use:
-
-- `token0Decimals = 18`
-- `token1Decimals = 6`
-- `useQuoteAsBase = false`
-- `weight = 50`
-
-Then export env vars:
+Required env:
 
 ```bash
 export PRIVATE_KEY=...
-export REACTIVE_MAINNET_RPC_URL=https://mainnet-rpc.rnk.dev/
-export DEFAULT_INTERVAL=900
-export CALLBACK_CHAIN_ID=1597
 export CALLBACK_TARGET=0xYourMonitor
-export CALLBACK_GAS_LIMIT=400000
-export DEPLOY_VALUE_WEI=1000000000000000000
 ```
 
-Run:
+Optional env:
+
+```bash
+export DEFAULT_INTERVAL=900
+export CALLBACK_CHAIN_ID=1597
+export CALLBACK_GAS_LIMIT=400000
+export DEPLOY_VALUE_WEI=0
+```
+
+Deploy to Reactive Mainnet:
 
 ```bash
 npx hardhat run scripts/deploy-price-aggregation.ts --network reactiveMainnet
 ```
 
-You can also use `--network lasna`.
+Deploy to Lasna:
+
+```bash
+npx hardhat run scripts/deploy-price-aggregation.ts --network lasna
+```
 
 ### Deploy full liquidation stack
 
+Script: [scripts/deploy-liquidation-stack.ts](/Users/perfogic/Workspace/Evm/oracle-aggregation/scripts/deploy-liquidation-stack.ts)
+
+Required env:
+
 ```bash
 export PRIVATE_KEY=...
-export REACTIVE_MAINNET_RPC_URL=https://mainnet-rpc.rnk.dev/
 export TRADER_SOURCE_CHAIN_ID=8453
 export TRADER_SOURCE_CONTRACT=0xYourTraderSource
 export REACTIVE_CHAIN_ID=1597
+```
+
+Optional env:
+
+```bash
 export DEFAULT_INTERVAL=900
 export AGGREGATOR_CALLBACK_GAS_LIMIT=400000
 export LIQUIDATION_EXECUTOR_GAS_LIMIT=300000
 export EXECUTOR_CALLBACK_SENDER=0x0000000000000000000000000000000000fffFfF
+export DEPLOY_VALUE_WEI=0
 ```
 
-Run:
+Deploy:
 
 ```bash
 npx hardhat run scripts/deploy-liquidation-stack.ts --network reactiveMainnet
 ```
+
+## Important Operational Notes
+
+- `ready = false` does not mean the aggregator is broken.
+  It means at least one pool has not accumulated enough history for the configured TWAP interval.
+- `activePools = N` does not imply `ready = true`.
+  A pool becomes active on first observation, but only becomes ready after enough time has elapsed.
+- same-second burst swaps can happen on active pools.
+  The oracle library now overwrites the latest tick for zero-delta timestamps instead of reverting.
+- the liquidation monitor no longer depends on a destination-side success subscription to remove users.
+  Trader removal is driven by the source-side `LiquidationPriceChange(trader, 0, true)` event.
+
+## Repository Layout
+
+- [src/PriceAggregationReactive.sol](/Users/perfogic/Workspace/Evm/oracle-aggregation/src/PriceAggregationReactive.sol)
+- [src/LiquidationMonitorReactive.sol](/Users/perfogic/Workspace/Evm/oracle-aggregation/src/LiquidationMonitorReactive.sol)
+- [src/LiquidationDestinationCallback.sol](/Users/perfogic/Workspace/Evm/oracle-aggregation/src/LiquidationDestinationCallback.sol)
+- [src/twap/TickCumulativeOracleLib.sol](/Users/perfogic/Workspace/Evm/oracle-aggregation/src/twap/TickCumulativeOracleLib.sol)
+- [test/PriceAggregationReactive.t.sol](/Users/perfogic/Workspace/Evm/oracle-aggregation/test/PriceAggregationReactive.t.sol)
+- [test/FullFlow.t.sol](/Users/perfogic/Workspace/Evm/oracle-aggregation/test/FullFlow.t.sol)
