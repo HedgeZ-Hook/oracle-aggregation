@@ -3,8 +3,7 @@ import { optionalBigInt } from "./utils";
 
 const DEFAULT_INTERVAL = 1800;
 const DEFAULT_CALLBACK_GAS_LIMIT = 400_000;
-
-const POOL_CONFIGS = [
+const MAINNET_POOL_CONFIGS = [
   {
     sourceChainId: 1n,
     pool: "0x4e68Ccd3E89f51C3074ca5072bbAC773960dFa36",
@@ -23,17 +22,30 @@ const POOL_CONFIGS = [
   },
 ] as const;
 
+const TESTNET_POOL_CONFIGS = [
+  {
+    sourceChainId: 11155111n,
+    pool: "0x0ba21779B8870E75A1eF24A29e0ccc392559d38f",
+    token0Decimals: 6,
+    token1Decimals: 18,
+    useQuoteAsBase: true,
+    weight: 1n,
+  },
+] as const;
+
 // @dev: this is for deploying reactive mainnet for testing
 async function main() {
   const { ethers } = await network.connect();
   const deployChainId = (await ethers.provider.getNetwork()).chainId;
   const interval = String(DEFAULT_INTERVAL);
-  const callbackChainId = 1;
+  const callbackChainId = 11155111;
   const callbackTarget = ethers.ZeroAddress;
   const callbackGasLimit = String(DEFAULT_CALLBACK_GAS_LIMIT);
   const deployValue = optionalBigInt("DEPLOY_VALUE_WEI", 5n * 10n ** 18n);
 
   const factory = await ethers.getContractFactory("PriceAggregationReactive");
+  const POOL_CONFIGS =
+    deployChainId !== 5318007n ? MAINNET_POOL_CONFIGS : TESTNET_POOL_CONFIGS;
   const contract = await factory.deploy(
     interval,
     POOL_CONFIGS,

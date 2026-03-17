@@ -14,14 +14,14 @@ contract LiquidationMonitorReactive is
     bytes32 public constant LIQUIDATION_PRICE_CHANGE_TOPIC =
         keccak256("LiquidationPriceChange(address,uint256,bool)");
 
-    uint256 public immutable sourceChainId;
+    uint256 public sourceChainId;
     // Emits LiquidationPriceChange(address,uint256,bool) updates for tracked traders.
-    address public immutable sourceContract;
+    address public sourceContract;
     // PriceAggregationReactive contract that handle for onAggregatedPrice(...).
-    address public immutable priceAggregationContract;
-    uint256 public immutable destinationChainId;
-    address public immutable destinationContract;
-    uint64 public immutable destinationGasLimit;
+    address public priceAggregationContract;
+    uint256 public destinationChainId;
+    address public destinationContract;
+    uint64 public destinationGasLimit;
 
     mapping(address => uint256) public liquidationPriceE18;
     mapping(address => uint256) public tradersIdx; // index in array, remember it is index + 1
@@ -37,6 +37,14 @@ contract LiquidationMonitorReactive is
         uint256 liquidationPriceE18,
         uint256 currentPriceE18
     );
+    event SourceUpdated(
+        uint256 indexed sourceChainId,
+        address indexed sourceContract
+    );
+    event DestinationContractUpdated(
+        uint256 indexed destinationChainId,
+        address indexed destinationContract
+    );
 
     constructor(
         uint256 _sourceChainId,
@@ -46,8 +54,6 @@ contract LiquidationMonitorReactive is
         address _destinationContract,
         uint64 _destinationGasLimit
     ) payable AbstractCallback(address(SERVICE_ADDR)) {
-        require(_sourceContract != address(0), "zero source");
-        require(_priceAggregationContract != address(0), "zero aggregator");
         require(_destinationContract != address(0), "zero destination");
 
         sourceChainId = _sourceChainId;
@@ -59,7 +65,7 @@ contract LiquidationMonitorReactive is
             ? DEFAULT_CALLBACK_GAS_LIMIT
             : _destinationGasLimit;
 
-        if (!vm) {
+        if (!vm && _sourceContract != address(0)) {
             service.subscribe(
                 sourceChainId,
                 sourceContract,
@@ -73,6 +79,74 @@ contract LiquidationMonitorReactive is
 
     function traderCount() external view returns (uint256) {
         return traders.length;
+    }
+
+    function setDestinationContract(
+        uint256 _destinationChainId,
+        address _destinationContract
+    ) external rnOnly onlyOwner {
+        require(
+            _destinationChainId != destinationChainId,
+            "same destination chain id"
+        );
+        require(_destinationContract != address(0), "zero destination");
+        destinationChainId = _destinationChainId;
+        destinationContract = _destinationContract;
+        emit DestinationContractUpdated(
+            _destinationChainId,
+            _destinationContract
+        );
+    }
+
+    function setDestinationGasLimit(
+        uint64 _destinationGasLimit
+    ) external rnOnly onlyOwner {
+        require(_destinationGasLimit != 0, "zero destination gas limit");
+        destinationGasLimit = _destinationGasLimit;
+    }
+
+    function setPriceAggregationContract(
+        address _priceAggregationContract
+    ) external rnOnly onlyOwner {
+        require(
+            _priceAggregationContract != address(0),
+            "zero price aggregation"
+        );
+        priceAggregationContract = _priceAggregationContract;
+    }
+
+    function setSourceContract(
+        uint256 _sourceChainId,
+        address _sourceContract
+    ) external rnOnly onlyOwner {
+        require(_sourceChainId != sourceChainId, "same source chain id");
+        require(_sourceContract != address(0), "zero source");
+        require(!paused, "paused");
+
+        if (sourceContract != address(0)) {
+            service.unsubscribe(
+                sourceChainId,
+                sourceContract,
+                uint256(LIQUIDATION_PRICE_CHANGE_TOPIC),
+                REACTIVE_IGNORE,
+                REACTIVE_IGNORE,
+                REACTIVE_IGNORE
+            );
+        }
+
+        sourceChainId = _sourceChainId;
+        sourceContract = _sourceContract;
+
+        service.subscribe(
+            sourceChainId,
+            sourceContract,
+            uint256(LIQUIDATION_PRICE_CHANGE_TOPIC),
+            REACTIVE_IGNORE,
+            REACTIVE_IGNORE,
+            REACTIVE_IGNORE
+        );
+
+        emit SourceUpdated(sourceChainId, sourceContract);
     }
 
     function onAggregatedPrice(

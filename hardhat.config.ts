@@ -22,6 +22,8 @@ const networks = {
     type: "edr-simulated" as const,
     chainType: "l1" as const,
   },
+  sepolia: httpNetwork("https://1rpc.io/sepolia", 11155111),
+  unichainSepolia: httpNetwork("https://sepolia.unichain.org", 1301),
   lasna: httpNetwork("https://lasna-rpc.rnk.dev/", 5318007),
   reactiveMainnet: httpNetwork("https://mainnet-rpc.rnk.dev/", 1597),
 };

@@ -4,8 +4,9 @@ pragma solidity >=0.8.0;
 import {AbstractCallback} from "@reactive/abstract-base/AbstractCallback.sol";
 import {IVammClearingHouse} from "./interfaces/IVammClearingHouse.sol";
 import {IVammOracle} from "./interfaces/IVammOracle.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
-contract LiquidationDestinationCallback is AbstractCallback {
+contract LiquidationDestinationCallback is AbstractCallback, Ownable {
     event LiquidationSuccess(address indexed trader);
     IVammOracle public oracleContract;
     IVammClearingHouse public clearingHouseContract;
@@ -14,8 +15,18 @@ contract LiquidationDestinationCallback is AbstractCallback {
         address _oracleContract,
         address _clearingHouseContract,
         address _callbackSender
-    ) payable AbstractCallback(_callbackSender) {
+    ) payable AbstractCallback(_callbackSender) Ownable(msg.sender) {
         oracleContract = IVammOracle(_oracleContract);
+        clearingHouseContract = IVammClearingHouse(_clearingHouseContract);
+    }
+
+    function setOracleContract(address _oracleContract) external onlyOwner {
+        oracleContract = IVammOracle(_oracleContract);
+    }
+
+    function setClearingHouseContract(
+        address _clearingHouseContract
+    ) external onlyOwner {
         clearingHouseContract = IVammClearingHouse(_clearingHouseContract);
     }
 

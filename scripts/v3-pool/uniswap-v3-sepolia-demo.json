@@ -1,0 +1,14 @@
+{
+  "mockUsdt": "0xe8B07Ab06513B3d5354eEc6Ef739d3Eb5E540d9f",
+  "weth": "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14",
+  "factory": "0x0227628f3F023bb0B980b67D528571c95c6DaC1c",
+  "positionManager": "0x1238536071E1c677A632429e3655c799b22cDA52",
+  "swapRouter": "0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E",
+  "pool": "0x0ba21779B8870E75A1eF24A29e0ccc392559d38f",
+  "token0": "0xe8B07Ab06513B3d5354eEc6Ef739d3Eb5E540d9f",
+  "token1": "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14",
+  "token0IsBase": false,
+  "fee": 3000,
+  "baseDecimals": 18,
+  "quoteDecimals": 6
+}
