@@ -133,10 +133,10 @@ contract LiquidationFlowTest is Test {
         }
 
         for (uint256 i = 0; i < 5; ++i) {
-            monitor.react(_liquidationPriceChangeLog(traders_[i], 3001e18));
+            monitor.react(_liquidationPriceChangeLog(traders_[i], 3001e18, false));
         }
         for (uint256 i = 5; i < 10; ++i) {
-            monitor.react(_liquidationPriceChangeLog(traders_[i], 2990e18));
+            monitor.react(_liquidationPriceChangeLog(traders_[i], 2990e18, false));
         }
 
         vm.warp(101);
@@ -226,7 +226,7 @@ contract LiquidationFlowTest is Test {
         for (uint256 i = 0; i < 5; ++i) {
             vm.prank(SERVICE_ADDR);
             destination.liquidate(traders_[i]);
-            monitor.react(_liquidationSuccessLog(traders_[i]));
+            monitor.react(_liquidationPriceChangeLog(traders_[i], 0, true));
             assertTrue(clearingHouse.liquidated(traders_[i]));
         }
 
@@ -285,6 +285,64 @@ contract LiquidationFlowTest is Test {
         assertEq(monitor.traderCount(), 5);
     }
 
+    function testIntegrationReadyTrueAfterWarmup() external {
+        address traderA = address(0xAAA1);
+        address traderB = address(0xAAA2);
+
+        vm.warp(100);
+        aggregator.react(_swapLog(POOL_A, ETH_USDC_3100_TICK, 1));
+        aggregator.react(_swapLog(POOL_B, ETH_USDC_3100_TICK, 1));
+
+        monitor.react(_liquidationPriceChangeLog(traderA, 3001e18, false));
+        monitor.react(_liquidationPriceChangeLog(traderB, 2990e18, false));
+
+        vm.warp(221);
+        aggregator.react(_swapLog(POOL_A, ETH_USDC_2995_TICK, 2));
+        aggregator.react(_swapLog(POOL_B, ETH_USDC_2995_TICK, 2));
+
+        (
+            uint256 readyPrice,
+            bool ready,
+            uint256 activePools
+        ) = aggregator.getAggregatePriceE18();
+
+        assertTrue(ready);
+        assertEq(activePools, 2);
+        assertTrue(readyPrice < 3101e18);
+        assertTrue(readyPrice > 3000e18);
+
+        vm.recordLogs();
+        vm.prank(SERVICE_ADDR);
+        monitor.onAggregatedPrice(address(aggregator), readyPrice, activePools);
+        Vm.Log[] memory callbackLogs = vm.getRecordedLogs();
+
+        assertEq(
+            _countCallbackLogsBySelector(
+                callbackLogs,
+                address(monitor),
+                UPDATE_ORACLE_SELECTOR
+            ),
+            1
+        );
+        assertEq(
+            _countCallbackLogsBySelector(
+                callbackLogs,
+                address(monitor),
+                LIQUIDATE_SELECTOR
+            ),
+            0
+        );
+
+        vm.prank(SERVICE_ADDR);
+        destination.updateOraclePrice(readyPrice);
+        assertEq(oracle.lastPriceE18(), readyPrice);
+        assertFalse(clearingHouse.liquidated(traderA));
+        assertFalse(clearingHouse.liquidated(traderB));
+        assertEq(monitor.traderCount(), 2);
+        assertEq(monitor.liquidationPriceE18(traderA), 3001e18);
+        assertEq(monitor.liquidationPriceE18(traderB), 2990e18);
+    }
+
     function _swapLog(
         address pool,
         int24 tick,
@@ -307,21 +365,13 @@ contract LiquidationFlowTest is Test {
 
     function _liquidationPriceChangeLog(
         address trader,
-        uint256 liquidationPrice
+        uint256 liquidationPrice,
+        bool isLiquidated
     ) internal view returns (IReactive.LogRecord memory log) {
         log.chain_id = SOURCE_CHAIN_ID;
         log._contract = LIQUIDATION_SOURCE;
         log.topic_0 = uint256(monitor.LIQUIDATION_PRICE_CHANGE_TOPIC());
-        log.data = abi.encode(trader, liquidationPrice);
-    }
-
-    function _liquidationSuccessLog(
-        address trader
-    ) internal view returns (IReactive.LogRecord memory log) {
-        log.chain_id = REACTIVE_CHAIN_ID;
-        log._contract = address(destination);
-        log.topic_0 = uint256(monitor.LIQUIDATION_SUCCESS_TOPIC());
-        log.topic_1 = uint256(uint160(trader));
+        log.data = abi.encode(trader, liquidationPrice, isLiquidated);
     }
 
     function _countCallbackLogsBySelector(

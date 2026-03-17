@@ -12,12 +12,10 @@ contract LiquidationMonitorReactive is
 {
     uint64 public constant DEFAULT_CALLBACK_GAS_LIMIT = 5_000_000;
     bytes32 public constant LIQUIDATION_PRICE_CHANGE_TOPIC =
-        keccak256("LiquidationPriceChange(address,uint256)");
-    bytes32 public constant LIQUIDATION_SUCCESS_TOPIC =
-        keccak256("LiquidationSuccess(address)");
+        keccak256("LiquidationPriceChange(address,uint256,bool)");
 
     uint256 public immutable sourceChainId;
-    // Emits LiquidationPriceChange(address,uint256) updates for tracked traders.
+    // Emits LiquidationPriceChange(address,uint256,bool) updates for tracked traders.
     address public immutable sourceContract;
     // PriceAggregationReactive contract that handle for onAggregatedPrice(...).
     address public immutable priceAggregationContract;
@@ -66,14 +64,6 @@ contract LiquidationMonitorReactive is
                 sourceChainId,
                 sourceContract,
                 uint256(LIQUIDATION_PRICE_CHANGE_TOPIC),
-                REACTIVE_IGNORE,
-                REACTIVE_IGNORE,
-                REACTIVE_IGNORE
-            );
-            service.subscribe(
-                destinationChainId,
-                destinationContract,
-                uint256(LIQUIDATION_SUCCESS_TOPIC),
                 REACTIVE_IGNORE,
                 REACTIVE_IGNORE,
                 REACTIVE_IGNORE
@@ -145,15 +135,6 @@ contract LiquidationMonitorReactive is
             return;
         }
 
-        if (
-            log.chain_id == destinationChainId &&
-            log._contract == destinationContract &&
-            log.topic_0 == uint256(LIQUIDATION_SUCCESS_TOPIC)
-        ) {
-            _handleLiquidationSuccess(address(uint160(log.topic_1)));
-            return;
-        }
-
         revert("unsupported log");
     }
 
@@ -163,7 +144,7 @@ contract LiquidationMonitorReactive is
         override
         returns (Subscription[] memory subscriptions)
     {
-        subscriptions = new Subscription[](2);
+        subscriptions = new Subscription[](1);
 
         subscriptions[0] = Subscription({
             chain_id: sourceChainId,
@@ -173,25 +154,14 @@ contract LiquidationMonitorReactive is
             topic_2: REACTIVE_IGNORE,
             topic_3: REACTIVE_IGNORE
         });
-
-        subscriptions[1] = Subscription({
-            chain_id: destinationChainId,
-            _contract: destinationContract,
-            topic_0: uint256(LIQUIDATION_SUCCESS_TOPIC),
-            topic_1: REACTIVE_IGNORE,
-            topic_2: REACTIVE_IGNORE,
-            topic_3: REACTIVE_IGNORE
-        });
     }
 
     function _handleLiquidationPriceChange(bytes calldata data) internal {
-        (address trader, uint256 liquidationPrice) = abi.decode(
-            data,
-            (address, uint256)
-        );
+        (address trader, uint256 liquidationPrice, bool isLiquidated) = abi
+            .decode(data, (address, uint256, bool));
 
         // user can't be liquidated due to position size in usd < their collateral
-        if (liquidationPrice == 0) {
+        if (liquidationPrice == 0 && isLiquidated) {
             _removeTrader(trader);
             return;
         }
@@ -203,10 +173,6 @@ contract LiquidationMonitorReactive is
         }
 
         emit TraderTracked(trader, liquidationPrice);
-    }
-
-    function _handleLiquidationSuccess(address trader) internal {
-        _removeTrader(trader);
     }
 
     function _removeTrader(address trader) internal {

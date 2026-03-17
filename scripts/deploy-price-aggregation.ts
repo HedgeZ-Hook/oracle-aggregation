@@ -31,7 +31,7 @@ async function main() {
   const callbackChainId = 1;
   const callbackTarget = ethers.ZeroAddress;
   const callbackGasLimit = String(DEFAULT_CALLBACK_GAS_LIMIT);
-  const deployValue = optionalBigInt("DEPLOY_VALUE_WEI", 0n);
+  const deployValue = optionalBigInt("DEPLOY_VALUE_WEI", 5n * 10n ** 18n);
 
   const factory = await ethers.getContractFactory("PriceAggregationReactive");
   const contract = await factory.deploy(

@@ -166,7 +166,6 @@ contract PriceAggregationReactive is
         state.initialized = true;
 
         _oracles[poolKey].update(standardizedTick, observedAt);
-
         (
             uint256 aggregatePriceE18,
             bool ready,
