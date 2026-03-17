@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import Decimal from "decimal.js";
-import { Contract, parseUnits } from "ethers";
+import { Contract, MaxUint256, parseUnits } from "ethers";
 import type { HardhatEthersHelpers } from "@nomicfoundation/hardhat-ethers/types";
 import {
   decodeQuotePerBase,
@@ -9,7 +9,6 @@ import {
   DEFAULT_RANDOM_ETH_MIN,
   ERC20_ABI,
   FACTORY_ABI,
-  FEE,
   parseUnitsDecimal,
   POOL_ABI,
   POSITION_MANAGER_ABI,
@@ -25,6 +24,10 @@ const DEFAULT_MIN_WETH_BALANCE = "0.6";
 const DEFAULT_TOPUP_WETH = "2.0";
 const DEFAULT_SWAP_INTERVAL_MS = 60_000;
 const MIN_SWAP_SCALE = new Decimal("0.125");
+const ERC20_ALLOWANCE_ABI = [
+  ...ERC20_ABI,
+  "function allowance(address owner, address spender) external view returns (uint256)",
+];
 
 export type SepoliaDeployment = {
   mockUsdt: string;
@@ -61,7 +64,7 @@ export async function makeRuntime(ethers: HardhatEthersHelpers) {
   const [deployer] = await ethers.getSigners();
   const deployment = loadDeployment();
 
-  const usdt = new Contract(deployment.mockUsdt, ERC20_ABI, deployer);
+  const usdt = new Contract(deployment.mockUsdt, ERC20_ALLOWANCE_ABI, deployer);
   const weth = new Contract(deployment.weth, WETH9_ABI, deployer);
   const factory = new Contract(deployment.factory, FACTORY_ABI, deployer);
   const positionManager = new Contract(
@@ -83,6 +86,7 @@ export async function makeRuntime(ethers: HardhatEthersHelpers) {
   }
 
   async function ensureBalances() {
+    const owner = await deployer.getAddress();
     const minUsdt = parseUnitsDecimal(
       { parseUnits },
       DEFAULT_MIN_USDT_BALANCE,
@@ -105,18 +109,29 @@ export async function makeRuntime(ethers: HardhatEthersHelpers) {
     );
 
     const [usdtBalance, wethBalance] = await Promise.all([
-      usdt.balanceOf(await deployer.getAddress()),
-      weth.balanceOf(await deployer.getAddress()),
+      usdt.balanceOf(owner),
+      weth.balanceOf(owner),
     ]);
 
     if (usdtBalance < minUsdt) {
-      await (await usdt.mint(await deployer.getAddress(), topUpUsdt)).wait();
-      await (await usdt.approve(deployment.swapRouter, topUpUsdt)).wait();
+      await (await usdt.mint(owner, topUpUsdt)).wait();
     }
 
     if (wethBalance < minWeth) {
       await (await weth.deposit({ value: topUpWeth })).wait();
-      await (await weth.approve(deployment.swapRouter, topUpWeth)).wait();
+    }
+
+    const [usdtAllowance, wethAllowance] = await Promise.all([
+      usdt.allowance(owner, deployment.swapRouter),
+      weth.allowance(owner, deployment.swapRouter),
+    ]);
+
+    if (usdtAllowance < topUpUsdt) {
+      await (await usdt.approve(deployment.swapRouter, MaxUint256)).wait();
+    }
+
+    if (wethAllowance < topUpWeth) {
+      await (await weth.approve(deployment.swapRouter, MaxUint256)).wait();
     }
   }
 

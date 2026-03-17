@@ -195,7 +195,8 @@ contract PriceAggregationReactive is
             lastNotifiedAggregatePriceE18 = aggregatePriceE18;
 
             bytes memory payload = abi.encodeWithSignature(
-                "onAggregatedPrice(address,uint256,uint256)",
+                "onAggregatedPrice(address,address,uint256,uint256)",
+                address(0),
                 address(this),
                 aggregatePriceE18,
                 activePools

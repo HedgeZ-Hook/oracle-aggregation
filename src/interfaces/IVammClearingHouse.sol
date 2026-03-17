@@ -2,5 +2,5 @@
 pragma solidity >=0.8.0;
 
 interface IVammClearingHouse {
-    function liquidate(address user) external;
+    function liquidate(address user) external returns (bool, uint256, uint256);
 }

@@ -8,6 +8,7 @@
     "compile": "hardhat compile",
     "test:hardhat": "hardhat test",
     "deploy:aggregation": "hardhat run scripts/deploy-price-aggregation.ts",
+    "deploy:sample-aggregation-callback": "hardhat run scripts/deploy-sample-aggregation-callback.ts",
     "deploy:full-flow": "hardhat run scripts/deploy-full-flow.ts",
     "deploy:liquidation-stack": "hardhat run scripts/deploy-liquidation-stack.ts",
     "deploy:sepolia:v3-demo": "hardhat run scripts/deploy-uniswap-v3-sepolia.ts --network sepolia",

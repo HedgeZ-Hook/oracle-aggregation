@@ -2,14 +2,12 @@
 pragma solidity >=0.8.0;
 
 import {Test} from "forge-std/Test.sol";
-import {Vm} from "forge-std/Vm.sol";
-
 import {IReactive} from "@reactive/interfaces/IReactive.sol";
 
 import {TickMath} from "../src/libraries/TickMath.sol";
 import {LiquidationDestinationCallback} from "../src/LiquidationDestinationCallback.sol";
-import {LiquidationMonitorReactive} from "../src/LiquidationMonitorReactive.sol";
 import {PriceAggregationReactive} from "../src/PriceAggregationReactive.sol";
+import {MockClearingHouse} from "../src/mocks/MockClearingHouse.sol";
 
 contract MockOracle {
     uint256 public lastPriceE18;
@@ -19,60 +17,33 @@ contract MockOracle {
     }
 }
 
-contract MockClearingHouse {
-    mapping(address => bool) public liquidated;
-    address[] public liquidatedTraders;
-
-    function liquidate(address user) external {
-        liquidated[user] = true;
-        liquidatedTraders.push(user);
-    }
-
-    function liquidatedCount() external view returns (uint256) {
-        return liquidatedTraders.length;
-    }
-}
-
 contract LiquidationFlowTest is Test {
-    event Callback(
-        uint256 indexed chain_id,
-        address indexed _contract,
-        uint64 indexed gas_limit,
-        bytes payload
-    );
-
     uint256 internal constant SOURCE_CHAIN_ID = 8453;
     uint256 internal constant REACTIVE_CHAIN_ID = 5318008;
     address internal constant SERVICE_ADDR =
         0x0000000000000000000000000000000000fffFfF;
     address internal constant POOL_A = address(0x1111);
     address internal constant POOL_B = address(0x2222);
-    address internal constant LIQUIDATION_SOURCE = address(0x3333);
     int24 internal constant ETH_USDC_3100_TICK = -195928;
     int24 internal constant ETH_USDC_2980_TICK = -196323;
     int24 internal constant ETH_USDC_2995_TICK = -196273;
 
-    bytes4 internal constant UPDATE_ORACLE_SELECTOR =
-        bytes4(keccak256("updateOraclePrice(uint256)"));
-    bytes4 internal constant LIQUIDATE_SELECTOR =
-        bytes4(keccak256("liquidate(address)"));
-
     MockOracle internal oracle;
     MockClearingHouse internal clearingHouse;
     LiquidationDestinationCallback internal destination;
-    LiquidationMonitorReactive internal monitor;
     PriceAggregationReactive internal aggregator;
 
     function setUp() external {
         vm.chainId(REACTIVE_CHAIN_ID);
 
         oracle = new MockOracle();
-        clearingHouse = new MockClearingHouse();
         destination = new LiquidationDestinationCallback(
             address(oracle),
-            address(clearingHouse),
+            address(0),
             SERVICE_ADDR
         );
+        clearingHouse = new MockClearingHouse(address(destination));
+        destination.setClearingHouseContract(address(clearingHouse));
 
         PriceAggregationReactive.PoolConfig[]
             memory poolConfigs = new PriceAggregationReactive.PoolConfig[](2);
@@ -99,18 +70,10 @@ contract LiquidationFlowTest is Test {
             120,
             poolConfigs,
             REACTIVE_CHAIN_ID,
-            address(0),
+            address(destination),
             400_000
         );
-
-        monitor = new LiquidationMonitorReactive(
-            SOURCE_CHAIN_ID,
-            LIQUIDATION_SOURCE,
-            address(aggregator),
-            REACTIVE_CHAIN_ID,
-            address(destination),
-            300_000
-        );
+        destination.setTrustedAggregator(address(aggregator));
     }
 
     function testIntegrationFullFlow() external {
@@ -133,11 +96,12 @@ contract LiquidationFlowTest is Test {
         }
 
         for (uint256 i = 0; i < 5; ++i) {
-            monitor.react(_liquidationPriceChangeLog(traders_[i], 3001e18, false));
+            clearingHouse.updateTrader(traders_[i], 3001e18, false);
         }
         for (uint256 i = 5; i < 10; ++i) {
-            monitor.react(_liquidationPriceChangeLog(traders_[i], 2990e18, false));
+            clearingHouse.updateTrader(traders_[i], 2990e18, false);
         }
+        assertEq(destination.traderCount(), 10);
 
         vm.warp(101);
         aggregator.react(_swapLog(POOL_B, ETH_USDC_2980_TICK, 2));
@@ -151,34 +115,16 @@ contract LiquidationFlowTest is Test {
         assertEq(activeAfterBOnly, 2);
         assertTrue(priceAfterBOnly > 3001e18);
 
-        vm.recordLogs();
         vm.prank(SERVICE_ADDR);
-        monitor.onAggregatedPrice(
+        destination.onAggregatedPrice(
+            address(0xdead),
             address(aggregator),
             priceAfterBOnly,
             activeAfterBOnly
         );
-        Vm.Log[] memory logsAfterBOnly = vm.getRecordedLogs();
-        assertEq(
-            _countCallbackLogsBySelector(
-                logsAfterBOnly,
-                address(monitor),
-                UPDATE_ORACLE_SELECTOR
-            ),
-            1
-        );
-        assertEq(
-            _countCallbackLogsBySelector(
-                logsAfterBOnly,
-                address(monitor),
-                LIQUIDATE_SELECTOR
-            ),
-            0
-        );
-
-        vm.prank(SERVICE_ADDR);
-        destination.updateOraclePrice(priceAfterBOnly);
+        assertEq(destination.latestOraclePriceE18(), priceAfterBOnly);
         assertEq(oracle.lastPriceE18(), priceAfterBOnly);
+        assertEq(destination.traderCount(), 10);
 
         vm.warp(102);
         aggregator.react(_swapLog(POOL_A, ETH_USDC_2995_TICK, 3));
@@ -194,51 +140,24 @@ contract LiquidationFlowTest is Test {
         assertTrue(priceAfterABreak > 2990e18);
         assertApproxEqAbs(priceAfterABreak, 2993500000000000000000, 4e17);
 
-        vm.recordLogs();
         vm.prank(SERVICE_ADDR);
-        monitor.onAggregatedPrice(
+        destination.onAggregatedPrice(
+            address(0xdead),
             address(aggregator),
             priceAfterABreak,
             activeAfterABreak
         );
-        Vm.Log[] memory liquidationRequestLogs = vm.getRecordedLogs();
-        assertEq(
-            _countCallbackLogsBySelector(
-                liquidationRequestLogs,
-                address(monitor),
-                UPDATE_ORACLE_SELECTOR
-            ),
-            1
-        );
-        assertEq(
-            _countCallbackLogsBySelector(
-                liquidationRequestLogs,
-                address(monitor),
-                LIQUIDATE_SELECTOR
-            ),
-            5
-        );
-
-        vm.prank(SERVICE_ADDR);
-        destination.updateOraclePrice(priceAfterABreak);
+        assertEq(destination.latestOraclePriceE18(), priceAfterABreak);
         assertEq(oracle.lastPriceE18(), priceAfterABreak);
+        assertEq(destination.traderCount(), 5);
 
         for (uint256 i = 0; i < 5; ++i) {
-            vm.prank(SERVICE_ADDR);
-            destination.liquidate(traders_[i]);
-            monitor.react(_liquidationPriceChangeLog(traders_[i], 0, true));
-            assertTrue(clearingHouse.liquidated(traders_[i]));
-        }
-
-        assertEq(clearingHouse.liquidatedCount(), 5);
-        assertEq(monitor.traderCount(), 5);
-        for (uint256 i = 0; i < 5; ++i) {
-            assertEq(monitor.liquidationPriceE18(traders_[i]), 0);
-            assertEq(monitor.tradersIdx(traders_[i]), 0);
+            assertEq(destination.liquidationPriceE18(traders_[i]), 0);
+            assertEq(destination.tradersIdx(traders_[i]), 0);
         }
         for (uint256 i = 5; i < 10; ++i) {
-            assertEq(monitor.liquidationPriceE18(traders_[i]), 2990e18);
-            assertTrue(monitor.tradersIdx(traders_[i]) > 0);
+            assertEq(destination.liquidationPriceE18(traders_[i]), 2990e18);
+            assertTrue(destination.tradersIdx(traders_[i]) > 0);
         }
 
         vm.warp(103);
@@ -254,35 +173,15 @@ contract LiquidationFlowTest is Test {
         assertApproxEqAbs(priceAfterArb, 2995e18, 3e17);
         assertTrue(priceAfterArb > 2990e18);
 
-        vm.recordLogs();
         vm.prank(SERVICE_ADDR);
-        monitor.onAggregatedPrice(
+        destination.onAggregatedPrice(
+            address(0xdead),
             address(aggregator),
             priceAfterArb,
             activeAfterArb
         );
-        Vm.Log[] memory logsAfterArb = vm.getRecordedLogs();
-        assertEq(
-            _countCallbackLogsBySelector(
-                logsAfterArb,
-                address(monitor),
-                UPDATE_ORACLE_SELECTOR
-            ),
-            1
-        );
-        assertEq(
-            _countCallbackLogsBySelector(
-                logsAfterArb,
-                address(monitor),
-                LIQUIDATE_SELECTOR
-            ),
-            0
-        );
-
-        vm.prank(SERVICE_ADDR);
-        destination.updateOraclePrice(priceAfterArb);
         assertEq(oracle.lastPriceE18(), priceAfterArb);
-        assertEq(monitor.traderCount(), 5);
+        assertEq(destination.traderCount(), 5);
     }
 
     function testIntegrationReadyTrueAfterWarmup() external {
@@ -293,54 +192,33 @@ contract LiquidationFlowTest is Test {
         aggregator.react(_swapLog(POOL_A, ETH_USDC_3100_TICK, 1));
         aggregator.react(_swapLog(POOL_B, ETH_USDC_3100_TICK, 1));
 
-        monitor.react(_liquidationPriceChangeLog(traderA, 3001e18, false));
-        monitor.react(_liquidationPriceChangeLog(traderB, 2990e18, false));
+        clearingHouse.updateTrader(traderA, 3001e18, false);
+        clearingHouse.updateTrader(traderB, 2990e18, false);
 
         vm.warp(221);
         aggregator.react(_swapLog(POOL_A, ETH_USDC_2995_TICK, 2));
         aggregator.react(_swapLog(POOL_B, ETH_USDC_2995_TICK, 2));
 
-        (
-            uint256 readyPrice,
-            bool ready,
-            uint256 activePools
-        ) = aggregator.getAggregatePriceE18();
+        (uint256 readyPrice, bool ready, uint256 activePools) = aggregator
+            .getAggregatePriceE18();
 
         assertTrue(ready);
         assertEq(activePools, 2);
         assertTrue(readyPrice < 3101e18);
         assertTrue(readyPrice > 3000e18);
 
-        vm.recordLogs();
         vm.prank(SERVICE_ADDR);
-        monitor.onAggregatedPrice(address(aggregator), readyPrice, activePools);
-        Vm.Log[] memory callbackLogs = vm.getRecordedLogs();
-
-        assertEq(
-            _countCallbackLogsBySelector(
-                callbackLogs,
-                address(monitor),
-                UPDATE_ORACLE_SELECTOR
-            ),
-            1
+        destination.onAggregatedPrice(
+            address(0xdead),
+            address(aggregator),
+            readyPrice,
+            activePools
         );
-        assertEq(
-            _countCallbackLogsBySelector(
-                callbackLogs,
-                address(monitor),
-                LIQUIDATE_SELECTOR
-            ),
-            0
-        );
-
-        vm.prank(SERVICE_ADDR);
-        destination.updateOraclePrice(readyPrice);
+        assertEq(destination.latestOraclePriceE18(), readyPrice);
         assertEq(oracle.lastPriceE18(), readyPrice);
-        assertFalse(clearingHouse.liquidated(traderA));
-        assertFalse(clearingHouse.liquidated(traderB));
-        assertEq(monitor.traderCount(), 2);
-        assertEq(monitor.liquidationPriceE18(traderA), 3001e18);
-        assertEq(monitor.liquidationPriceE18(traderB), 2990e18);
+        assertEq(destination.traderCount(), 2);
+        assertEq(destination.liquidationPriceE18(traderA), 3001e18);
+        assertEq(destination.liquidationPriceE18(traderB), 2990e18);
     }
 
     function _swapLog(
@@ -361,39 +239,5 @@ contract LiquidationFlowTest is Test {
             tick
         );
         log.block_number = blockNumber;
-    }
-
-    function _liquidationPriceChangeLog(
-        address trader,
-        uint256 liquidationPrice,
-        bool isLiquidated
-    ) internal view returns (IReactive.LogRecord memory log) {
-        log.chain_id = SOURCE_CHAIN_ID;
-        log._contract = LIQUIDATION_SOURCE;
-        log.topic_0 = uint256(monitor.LIQUIDATION_PRICE_CHANGE_TOPIC());
-        log.data = abi.encode(trader, liquidationPrice, isLiquidated);
-    }
-
-    function _countCallbackLogsBySelector(
-        Vm.Log[] memory logs,
-        address emitter,
-        bytes4 selector
-    ) internal pure returns (uint256 count) {
-        bytes32 callbackTopic = keccak256(
-            "Callback(uint256,address,uint64,bytes)"
-        );
-
-        for (uint256 i = 0; i < logs.length; ++i) {
-            if (
-                logs[i].emitter == emitter &&
-                logs[i].topics.length > 0 &&
-                logs[i].topics[0] == callbackTopic
-            ) {
-                bytes memory payload = abi.decode(logs[i].data, (bytes));
-                if (bytes4(payload) == selector) {
-                    count++;
-                }
-            }
-        }
     }
 }
