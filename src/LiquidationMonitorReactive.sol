@@ -10,25 +10,30 @@ contract LiquidationMonitorReactive is
     AbstractPausableReactive,
     AbstractCallback
 {
-    uint64 public constant DEFAULT_CALLBACK_GAS_LIMIT = 1_000_000;
-    bytes32 public constant TRADER_LIQUIDATION_UPDATE_TOPIC =
-        keccak256("TraderLiquidationUpdate(address,uint256)");
-    bytes32 public constant TRADER_LIQUIDATED_TOPIC =
-        keccak256("TraderLiquidated(address)");
+    uint64 public constant DEFAULT_CALLBACK_GAS_LIMIT = 5_000_000;
+    bytes32 public constant LIQUIDATION_PRICE_CHANGE_TOPIC =
+        keccak256("LiquidationPriceChange(address,uint256)");
+    bytes32 public constant LIQUIDATION_SUCCESS_TOPIC =
+        keccak256("LiquidationSuccess(address)");
 
-    uint256 public immutable traderSourceChainId;
-    address public immutable traderSourceContract;
-    address public immutable priceAggregationReactive;
-    address public immutable liquidationExecutor;
-    uint256 public immutable liquidationExecutorChainId;
-    uint64 public immutable liquidationExecutorGasLimit;
+    uint256 public immutable sourceChainId;
+    // Emits LiquidationPriceChange(address,uint256) updates for tracked traders.
+    address public immutable sourceContract;
+    // PriceAggregationReactive contract that handle for onAggregatedPrice(...).
+    address public immutable priceAggregationContract;
+    uint256 public immutable destinationChainId;
+    address public immutable destinationContract;
+    uint64 public immutable destinationGasLimit;
 
     mapping(address => uint256) public liquidationPriceE18;
-    mapping(address => uint256) public traderIndexPlusOne;
+    mapping(address => uint256) public tradersIdx; // index in array, remember it is index + 1
     address[] public traders;
 
     event TraderTracked(address indexed trader, uint256 liquidationPriceE18);
-    event TraderRemoved(address indexed trader);
+    event LiquidationSuccess(
+        address indexed trader,
+        uint256 liquidationPriceE18
+    );
     event LiquidationRequested(
         address indexed trader,
         uint256 liquidationPriceE18,
@@ -36,39 +41,39 @@ contract LiquidationMonitorReactive is
     );
 
     constructor(
-        uint256 traderSourceChainId_,
-        address traderSourceContract_,
-        address priceAggregationReactive_,
-        address liquidationExecutor_,
-        uint256 liquidationExecutorChainId_,
-        uint64 liquidationExecutorGasLimit_
+        uint256 _sourceChainId,
+        address _sourceContract,
+        address _priceAggregationContract,
+        uint256 _destinationChainId,
+        address _destinationContract,
+        uint64 _destinationGasLimit
     ) payable AbstractCallback(address(SERVICE_ADDR)) {
-        require(traderSourceContract_ != address(0), "zero source");
-        require(priceAggregationReactive_ != address(0), "zero aggregator");
-        require(liquidationExecutor_ != address(0), "zero executor");
+        require(_sourceContract != address(0), "zero source");
+        require(_priceAggregationContract != address(0), "zero aggregator");
+        require(_destinationContract != address(0), "zero destination");
 
-        traderSourceChainId = traderSourceChainId_;
-        traderSourceContract = traderSourceContract_;
-        priceAggregationReactive = priceAggregationReactive_;
-        liquidationExecutor = liquidationExecutor_;
-        liquidationExecutorChainId = liquidationExecutorChainId_;
-        liquidationExecutorGasLimit = liquidationExecutorGasLimit_ == 0
+        sourceChainId = _sourceChainId;
+        sourceContract = _sourceContract;
+        priceAggregationContract = _priceAggregationContract;
+        destinationChainId = _destinationChainId;
+        destinationContract = _destinationContract;
+        destinationGasLimit = _destinationGasLimit == 0
             ? DEFAULT_CALLBACK_GAS_LIMIT
-            : liquidationExecutorGasLimit_;
+            : _destinationGasLimit;
 
         if (!vm) {
             service.subscribe(
-                traderSourceChainId,
-                traderSourceContract,
-                uint256(TRADER_LIQUIDATION_UPDATE_TOPIC),
+                sourceChainId,
+                sourceContract,
+                uint256(LIQUIDATION_PRICE_CHANGE_TOPIC),
                 REACTIVE_IGNORE,
                 REACTIVE_IGNORE,
                 REACTIVE_IGNORE
             );
             service.subscribe(
-                liquidationExecutorChainId,
-                liquidationExecutor,
-                uint256(TRADER_LIQUIDATED_TOPIC),
+                destinationChainId,
+                destinationContract,
+                uint256(LIQUIDATION_SUCCESS_TOPIC),
                 REACTIVE_IGNORE,
                 REACTIVE_IGNORE,
                 REACTIVE_IGNORE
@@ -85,7 +90,10 @@ contract LiquidationMonitorReactive is
         uint256 currentPriceE18,
         uint256 activePools
     ) external authorizedSenderOnly {
-        require(sender == priceAggregationReactive, "bad aggregator");
+        require(
+            sender == priceAggregationContract,
+            "ERR: bad price aggregation contract"
+        );
         if (activePools == 0 || currentPriceE18 == 0) {
             return;
         }
@@ -99,35 +107,50 @@ contract LiquidationMonitorReactive is
             }
 
             bytes memory payload = abi.encodeWithSignature(
-                "liquidateTrader(address)",
+                "liquidate(address)",
                 trader
             );
             emit Callback(
-                liquidationExecutorChainId,
-                liquidationExecutor,
-                liquidationExecutorGasLimit,
+                destinationChainId,
+                destinationContract,
+                destinationGasLimit,
                 payload
             );
-            emit LiquidationRequested(trader, liquidationPrice, currentPriceE18);
+            emit LiquidationRequested(
+                trader,
+                liquidationPrice,
+                currentPriceE18
+            );
         }
+
+        bytes memory oraclePayload = abi.encodeWithSignature(
+            "updateOraclePrice(uint256)",
+            currentPriceE18
+        );
+        emit Callback(
+            destinationChainId,
+            destinationContract,
+            destinationGasLimit,
+            oraclePayload
+        );
     }
 
     function react(LogRecord calldata log) external vmOnly {
         if (
-            log.chain_id == traderSourceChainId &&
-            log._contract == traderSourceContract &&
-            log.topic_0 == uint256(TRADER_LIQUIDATION_UPDATE_TOPIC)
+            log.chain_id == sourceChainId &&
+            log._contract == sourceContract &&
+            log.topic_0 == uint256(LIQUIDATION_PRICE_CHANGE_TOPIC)
         ) {
-            _handleLiquidationUpdate(log.data);
+            _handleLiquidationPriceChange(log.data);
             return;
         }
 
         if (
-            log.chain_id == liquidationExecutorChainId &&
-            log._contract == liquidationExecutor &&
-            log.topic_0 == uint256(TRADER_LIQUIDATED_TOPIC)
+            log.chain_id == destinationChainId &&
+            log._contract == destinationContract &&
+            log.topic_0 == uint256(LIQUIDATION_SUCCESS_TOPIC)
         ) {
-            _handleLiquidated(address(uint160(log.topic_1)));
+            _handleLiquidationSuccess(address(uint160(log.topic_1)));
             return;
         }
 
@@ -143,67 +166,71 @@ contract LiquidationMonitorReactive is
         subscriptions = new Subscription[](2);
 
         subscriptions[0] = Subscription({
-            chain_id: traderSourceChainId,
-            _contract: traderSourceContract,
-            topic_0: uint256(TRADER_LIQUIDATION_UPDATE_TOPIC),
+            chain_id: sourceChainId,
+            _contract: sourceContract,
+            topic_0: uint256(LIQUIDATION_PRICE_CHANGE_TOPIC),
             topic_1: REACTIVE_IGNORE,
             topic_2: REACTIVE_IGNORE,
             topic_3: REACTIVE_IGNORE
         });
 
         subscriptions[1] = Subscription({
-            chain_id: liquidationExecutorChainId,
-            _contract: liquidationExecutor,
-            topic_0: uint256(TRADER_LIQUIDATED_TOPIC),
+            chain_id: destinationChainId,
+            _contract: destinationContract,
+            topic_0: uint256(LIQUIDATION_SUCCESS_TOPIC),
             topic_1: REACTIVE_IGNORE,
             topic_2: REACTIVE_IGNORE,
             topic_3: REACTIVE_IGNORE
         });
     }
 
-    function _handleLiquidationUpdate(bytes calldata data) internal {
+    function _handleLiquidationPriceChange(bytes calldata data) internal {
         (address trader, uint256 liquidationPrice) = abi.decode(
             data,
             (address, uint256)
         );
 
+        // user can't be liquidated due to position size in usd < their collateral
         if (liquidationPrice == 0) {
             _removeTrader(trader);
             return;
         }
 
         liquidationPriceE18[trader] = liquidationPrice;
-        if (traderIndexPlusOne[trader] == 0) {
+        if (tradersIdx[trader] == 0) {
             traders.push(trader);
-            traderIndexPlusOne[trader] = traders.length;
+            tradersIdx[trader] = traders.length;
         }
 
         emit TraderTracked(trader, liquidationPrice);
     }
 
-    function _handleLiquidated(address trader) internal {
+    function _handleLiquidationSuccess(address trader) internal {
         _removeTrader(trader);
     }
 
     function _removeTrader(address trader) internal {
-        uint256 indexPlusOne = traderIndexPlusOne[trader];
+        uint256 traderIdx = tradersIdx[trader];
+        uint256 liquidationPrice = liquidationPriceE18[trader];
         delete liquidationPriceE18[trader];
 
-        if (indexPlusOne == 0) {
+        // meant unset
+        if (traderIdx == 0) {
             return;
         }
 
-        uint256 index = indexPlusOne - 1;
+        // for simplicity, we remove by update last trader to the position of removed trader
+        // O(1)
+        uint256 index = traderIdx - 1; // real index
         uint256 lastIndex = traders.length - 1;
         if (index != lastIndex) {
             address movedTrader = traders[lastIndex];
             traders[index] = movedTrader;
-            traderIndexPlusOne[movedTrader] = index + 1;
+            tradersIdx[movedTrader] = index + 1;
         }
-
         traders.pop();
-        delete traderIndexPlusOne[trader];
+        delete tradersIdx[trader];
 
-        emit TraderRemoved(trader);
+        emit LiquidationSuccess(trader, liquidationPrice);
     }
 }

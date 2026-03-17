@@ -63,20 +63,14 @@ contract PriceAggregationReactive is
     );
 
     constructor(
-        uint80 defaultInterval_,
+        uint80 _defaultInterval,
         PoolConfig[] memory poolConfigs_,
-        uint256 callbackChainId_,
-        address callbackTarget_,
-        uint64 callbackGasLimit_
+        uint256 _callbackChainId,
+        address _callbackTarget,
+        uint64 _callbackGasLimit
     ) payable {
         require(poolConfigs_.length > 0, "no pools");
-        defaultInterval = defaultInterval_;
-        callbackChainId = callbackChainId_;
-        callbackTarget = callbackTarget_;
-        callbackGasLimit = callbackGasLimit_ == 0
-            ? DEFAULT_CALLBACK_GAS_LIMIT
-            : callbackGasLimit_;
-
+        defaultInterval = _defaultInterval;
         for (uint256 i = 0; i < poolConfigs_.length; ++i) {
             PoolConfig memory cfg = poolConfigs_[i];
             _validatePoolConfig(cfg);
@@ -91,6 +85,12 @@ contract PriceAggregationReactive is
                 _subscribe(cfg);
             }
         }
+
+        callbackChainId = _callbackChainId;
+        callbackTarget = _callbackTarget;
+        callbackGasLimit = _callbackGasLimit == 0
+            ? DEFAULT_CALLBACK_GAS_LIMIT
+            : _callbackGasLimit;
     }
 
     function poolCount() external view returns (uint256) {
@@ -143,7 +143,11 @@ contract PriceAggregationReactive is
 
     function getAggregatePriceE18(
         uint256 interval
-    ) external view returns (uint256 priceE18, bool ready, uint256 activePools) {
+    )
+        external
+        view
+        returns (uint256 priceE18, bool ready, uint256 activePools)
+    {
         return _aggregate(interval);
     }
 
@@ -163,11 +167,18 @@ contract PriceAggregationReactive is
 
         _oracles[poolKey].update(standardizedTick, observedAt);
 
-        (uint256 aggregatePriceE18, bool ready, uint256 activePools) = _aggregate(
-            defaultInterval
-        );
+        (
+            uint256 aggregatePriceE18,
+            bool ready,
+            uint256 activePools
+        ) = _aggregate(defaultInterval);
 
-        emit PoolObserved(poolKey, standardizedTick, log.block_number, observedAt);
+        emit PoolObserved(
+            poolKey,
+            standardizedTick,
+            log.block_number,
+            observedAt
+        );
         emit AggregateComputed(
             aggregatePriceE18,
             ready,
@@ -178,10 +189,8 @@ contract PriceAggregationReactive is
         if (
             callbackTarget != address(0) &&
             activePools > 0 &&
-            (
-                !hasNotifiedAggregatePrice ||
-                aggregatePriceE18 != lastNotifiedAggregatePriceE18
-            )
+            (!hasNotifiedAggregatePrice ||
+                aggregatePriceE18 != lastNotifiedAggregatePriceE18)
         ) {
             hasNotifiedAggregatePrice = true;
             lastNotifiedAggregatePriceE18 = aggregatePriceE18;
@@ -192,8 +201,12 @@ contract PriceAggregationReactive is
                 aggregatePriceE18,
                 activePools
             );
-
-            emit Callback(callbackChainId, callbackTarget, callbackGasLimit, payload);
+            emit Callback(
+                callbackChainId,
+                callbackTarget,
+                callbackGasLimit,
+                payload
+            );
         }
     }
 
@@ -252,7 +265,11 @@ contract PriceAggregationReactive is
 
     function _aggregate(
         uint256 interval
-    ) internal view returns (uint256 aggregatePriceE18, bool ready, uint256 activePools) {
+    )
+        internal
+        view
+        returns (uint256 aggregatePriceE18, bool ready, uint256 activePools)
+    {
         uint256 weightedPriceSum;
         uint256 totalWeight;
         bool allReady = true;

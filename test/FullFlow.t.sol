@@ -6,12 +6,32 @@ import {Vm} from "forge-std/Vm.sol";
 
 import {IReactive} from "@reactive/interfaces/IReactive.sol";
 
-import {FullMath} from "../src/libraries/FullMath.sol";
 import {TickMath} from "../src/libraries/TickMath.sol";
-import {MockLiquidationExecutorCallback} from "../src/MockLiquidationExecutorCallback.sol";
+import {LiquidationDestinationCallback} from "../src/LiquidationDestinationCallback.sol";
 import {LiquidationMonitorReactive} from "../src/LiquidationMonitorReactive.sol";
 import {PriceAggregationReactive} from "../src/PriceAggregationReactive.sol";
-import {console2} from "forge-std/console2.sol";
+
+contract MockOracle {
+    uint256 public lastPriceE18;
+
+    function updateOraclePrice(uint256 priceE18) external {
+        lastPriceE18 = priceE18;
+    }
+}
+
+contract MockClearingHouse {
+    mapping(address => bool) public liquidated;
+    address[] public liquidatedTraders;
+
+    function liquidate(address user) external {
+        liquidated[user] = true;
+        liquidatedTraders.push(user);
+    }
+
+    function liquidatedCount() external view returns (uint256) {
+        return liquidatedTraders.length;
+    }
+}
 
 contract LiquidationFlowTest is Test {
     event Callback(
@@ -28,22 +48,31 @@ contract LiquidationFlowTest is Test {
     address internal constant POOL_A = address(0x1111);
     address internal constant POOL_B = address(0x2222);
     address internal constant LIQUIDATION_SOURCE = address(0x3333);
-    address internal constant ALICE = address(0xA11CE);
-    address internal constant BOB = address(0xB0B);
     int24 internal constant ETH_USDC_3100_TICK = -195928;
-    int24 internal constant ETH_USDC_3000_TICK = -196256;
-    int24 internal constant ETH_USDC_2999_TICK = -196257;
     int24 internal constant ETH_USDC_2980_TICK = -196323;
     int24 internal constant ETH_USDC_2995_TICK = -196273;
 
-    MockLiquidationExecutorCallback internal executor;
+    bytes4 internal constant UPDATE_ORACLE_SELECTOR =
+        bytes4(keccak256("updateOraclePrice(uint256)"));
+    bytes4 internal constant LIQUIDATE_SELECTOR =
+        bytes4(keccak256("liquidate(address)"));
+
+    MockOracle internal oracle;
+    MockClearingHouse internal clearingHouse;
+    LiquidationDestinationCallback internal destination;
     LiquidationMonitorReactive internal monitor;
     PriceAggregationReactive internal aggregator;
 
     function setUp() external {
         vm.chainId(REACTIVE_CHAIN_ID);
 
-        executor = new MockLiquidationExecutorCallback(SERVICE_ADDR);
+        oracle = new MockOracle();
+        clearingHouse = new MockClearingHouse();
+        destination = new LiquidationDestinationCallback(
+            address(oracle),
+            address(clearingHouse),
+            SERVICE_ADDR
+        );
 
         PriceAggregationReactive.PoolConfig[]
             memory poolConfigs = new PriceAggregationReactive.PoolConfig[](2);
@@ -66,20 +95,11 @@ contract LiquidationFlowTest is Test {
             weight: 10
         });
 
-        monitor = new LiquidationMonitorReactive(
-            SOURCE_CHAIN_ID,
-            LIQUIDATION_SOURCE,
-            address(0x1234), // placeholder, overwritten after aggregator deploy
-            address(executor),
-            REACTIVE_CHAIN_ID,
-            300_000
-        );
-
         aggregator = new PriceAggregationReactive(
             120,
             poolConfigs,
             REACTIVE_CHAIN_ID,
-            address(monitor),
+            address(0),
             400_000
         );
 
@@ -87,8 +107,8 @@ contract LiquidationFlowTest is Test {
             SOURCE_CHAIN_ID,
             LIQUIDATION_SOURCE,
             address(aggregator),
-            address(executor),
             REACTIVE_CHAIN_ID,
+            address(destination),
             300_000
         );
     }
@@ -113,32 +133,22 @@ contract LiquidationFlowTest is Test {
         }
 
         for (uint256 i = 0; i < 5; ++i) {
-            monitor.react(_liquidationUpdateLog(traders_[i], 3001e18));
+            monitor.react(_liquidationPriceChangeLog(traders_[i], 3001e18));
         }
         for (uint256 i = 5; i < 10; ++i) {
-            monitor.react(_liquidationUpdateLog(traders_[i], 2990e18));
+            monitor.react(_liquidationPriceChangeLog(traders_[i], 2990e18));
         }
 
         vm.warp(101);
         aggregator.react(_swapLog(POOL_B, ETH_USDC_2980_TICK, 2));
 
-        (uint256 priceA, ) = aggregator.getPoolPriceE18(
-            keccak256(abi.encode(SOURCE_CHAIN_ID, POOL_A))
-        );
-        (uint256 priceB, ) = aggregator.getPoolPriceE18(
-            keccak256(abi.encode(SOURCE_CHAIN_ID, POOL_B))
-        );
         (
             uint256 priceAfterBOnly,
             bool readyAfterBOnly,
             uint256 activeAfterBOnly
         ) = aggregator.getAggregatePriceE18(0);
-
         assertTrue(readyAfterBOnly);
         assertEq(activeAfterBOnly, 2);
-        console2.log("priceA", priceA);
-        console2.log("priceB", priceB);
-        console2.log("priceAfterBOnly", priceAfterBOnly);
         assertTrue(priceAfterBOnly > 3001e18);
 
         vm.recordLogs();
@@ -149,7 +159,26 @@ contract LiquidationFlowTest is Test {
             activeAfterBOnly
         );
         Vm.Log[] memory logsAfterBOnly = vm.getRecordedLogs();
-        assertEq(_countCallbackLogs(logsAfterBOnly, address(monitor)), 0);
+        assertEq(
+            _countCallbackLogsBySelector(
+                logsAfterBOnly,
+                address(monitor),
+                UPDATE_ORACLE_SELECTOR
+            ),
+            1
+        );
+        assertEq(
+            _countCallbackLogsBySelector(
+                logsAfterBOnly,
+                address(monitor),
+                LIQUIDATE_SELECTOR
+            ),
+            0
+        );
+
+        vm.prank(SERVICE_ADDR);
+        destination.updateOraclePrice(priceAfterBOnly);
+        assertEq(oracle.lastPriceE18(), priceAfterBOnly);
 
         vm.warp(102);
         aggregator.react(_swapLog(POOL_A, ETH_USDC_2995_TICK, 3));
@@ -174,24 +203,42 @@ contract LiquidationFlowTest is Test {
         );
         Vm.Log[] memory liquidationRequestLogs = vm.getRecordedLogs();
         assertEq(
-            _countCallbackLogs(liquidationRequestLogs, address(monitor)),
+            _countCallbackLogsBySelector(
+                liquidationRequestLogs,
+                address(monitor),
+                UPDATE_ORACLE_SELECTOR
+            ),
+            1
+        );
+        assertEq(
+            _countCallbackLogsBySelector(
+                liquidationRequestLogs,
+                address(monitor),
+                LIQUIDATE_SELECTOR
+            ),
             5
         );
 
+        vm.prank(SERVICE_ADDR);
+        destination.updateOraclePrice(priceAfterABreak);
+        assertEq(oracle.lastPriceE18(), priceAfterABreak);
+
         for (uint256 i = 0; i < 5; ++i) {
             vm.prank(SERVICE_ADDR);
-            executor.liquidateTrader(traders_[i]);
-            monitor.react(_liquidatedLog(traders_[i]));
+            destination.liquidate(traders_[i]);
+            monitor.react(_liquidationSuccessLog(traders_[i]));
+            assertTrue(clearingHouse.liquidated(traders_[i]));
         }
 
+        assertEq(clearingHouse.liquidatedCount(), 5);
         assertEq(monitor.traderCount(), 5);
         for (uint256 i = 0; i < 5; ++i) {
             assertEq(monitor.liquidationPriceE18(traders_[i]), 0);
-            assertEq(monitor.traderIndexPlusOne(traders_[i]), 0);
+            assertEq(monitor.tradersIdx(traders_[i]), 0);
         }
         for (uint256 i = 5; i < 10; ++i) {
             assertEq(monitor.liquidationPriceE18(traders_[i]), 2990e18);
-            assertTrue(monitor.traderIndexPlusOne(traders_[i]) > 0);
+            assertTrue(monitor.tradersIdx(traders_[i]) > 0);
         }
 
         vm.warp(103);
@@ -215,7 +262,26 @@ contract LiquidationFlowTest is Test {
             activeAfterArb
         );
         Vm.Log[] memory logsAfterArb = vm.getRecordedLogs();
-        assertEq(_countCallbackLogs(logsAfterArb, address(monitor)), 0);
+        assertEq(
+            _countCallbackLogsBySelector(
+                logsAfterArb,
+                address(monitor),
+                UPDATE_ORACLE_SELECTOR
+            ),
+            1
+        );
+        assertEq(
+            _countCallbackLogsBySelector(
+                logsAfterArb,
+                address(monitor),
+                LIQUIDATE_SELECTOR
+            ),
+            0
+        );
+
+        vm.prank(SERVICE_ADDR);
+        destination.updateOraclePrice(priceAfterArb);
+        assertEq(oracle.lastPriceE18(), priceAfterArb);
         assertEq(monitor.traderCount(), 5);
     }
 
@@ -224,18 +290,9 @@ contract LiquidationFlowTest is Test {
         int24 tick,
         uint256 blockNumber
     ) internal view returns (IReactive.LogRecord memory log) {
-        return _swapLogFor(aggregator, pool, tick, blockNumber);
-    }
-
-    function _swapLogFor(
-        PriceAggregationReactive targetAggregator,
-        address pool,
-        int24 tick,
-        uint256 blockNumber
-    ) internal view returns (IReactive.LogRecord memory log) {
         log.chain_id = SOURCE_CHAIN_ID;
         log._contract = pool;
-        log.topic_0 = uint256(targetAggregator.V3_SWAP_TOPIC());
+        log.topic_0 = uint256(aggregator.V3_SWAP_TOPIC());
         log.topic_1 = uint256(uint160(address(0xAAAA)));
         log.topic_2 = uint256(uint160(address(0xBBBB)));
         log.data = abi.encode(
@@ -248,44 +305,29 @@ contract LiquidationFlowTest is Test {
         log.block_number = blockNumber;
     }
 
-    function _liquidationUpdateLog(
-        address trader,
-        uint256 liquidationPrice
-    ) internal view returns (IReactive.LogRecord memory log) {
-        return _liquidationUpdateLogFor(monitor, trader, liquidationPrice);
-    }
-
-    function _liquidationUpdateLogFor(
-        LiquidationMonitorReactive targetMonitor,
+    function _liquidationPriceChangeLog(
         address trader,
         uint256 liquidationPrice
     ) internal view returns (IReactive.LogRecord memory log) {
         log.chain_id = SOURCE_CHAIN_ID;
         log._contract = LIQUIDATION_SOURCE;
-        log.topic_0 = uint256(targetMonitor.TRADER_LIQUIDATION_UPDATE_TOPIC());
+        log.topic_0 = uint256(monitor.LIQUIDATION_PRICE_CHANGE_TOPIC());
         log.data = abi.encode(trader, liquidationPrice);
     }
 
-    function _liquidatedLog(
-        address trader
-    ) internal view returns (IReactive.LogRecord memory log) {
-        return _liquidatedLogFor(monitor, executor, trader);
-    }
-
-    function _liquidatedLogFor(
-        LiquidationMonitorReactive targetMonitor,
-        MockLiquidationExecutorCallback targetExecutor,
+    function _liquidationSuccessLog(
         address trader
     ) internal view returns (IReactive.LogRecord memory log) {
         log.chain_id = REACTIVE_CHAIN_ID;
-        log._contract = address(targetExecutor);
-        log.topic_0 = uint256(targetMonitor.TRADER_LIQUIDATED_TOPIC());
+        log._contract = address(destination);
+        log.topic_0 = uint256(monitor.LIQUIDATION_SUCCESS_TOPIC());
         log.topic_1 = uint256(uint160(trader));
     }
 
-    function _countCallbackLogs(
+    function _countCallbackLogsBySelector(
         Vm.Log[] memory logs,
-        address emitter
+        address emitter,
+        bytes4 selector
     ) internal pure returns (uint256 count) {
         bytes32 callbackTopic = keccak256(
             "Callback(uint256,address,uint64,bytes)"
@@ -297,28 +339,11 @@ contract LiquidationFlowTest is Test {
                 logs[i].topics.length > 0 &&
                 logs[i].topics[0] == callbackTopic
             ) {
-                count++;
+                bytes memory payload = abi.decode(logs[i].data, (bytes));
+                if (bytes4(payload) == selector) {
+                    count++;
+                }
             }
         }
-    }
-
-    function _priceAtTick(
-        int24 tick,
-        uint8 baseDecimals,
-        uint8 quoteDecimals
-    ) internal pure returns (uint256) {
-        uint160 sqrtPriceX96 = TickMath.getSqrtPriceAtTick(tick);
-        uint256 ratioX128 = FullMath.mulDiv(
-            uint256(sqrtPriceX96),
-            uint256(sqrtPriceX96),
-            uint256(1) << 64
-        );
-
-        return
-            FullMath.mulDiv(
-                ratioX128,
-                (10 ** baseDecimals) * 1e18,
-                (uint256(1) << 128) * (10 ** quoteDecimals)
-            );
     }
 }

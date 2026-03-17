@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity >=0.8.0;
 
-import { IVammPerpHook } from "../interfaces/IVammPerpHook.sol";
-
-contract MockVammPerpHook is IVammPerpHook {
+contract MockVammPerpHook {
     event PositionUpdated(
         bytes32 indexed marketId,
         address indexed account,

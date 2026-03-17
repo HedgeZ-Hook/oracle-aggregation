@@ -1,0 +1,26 @@
+{
+  "name": "oracle-aggregation",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "hardhat compile",
+    "compile": "hardhat compile",
+    "test:hardhat": "hardhat test",
+    "deploy:aggregation": "hardhat run scripts/deploy-price-aggregation.ts",
+    "deploy:liquidation-stack": "hardhat run scripts/deploy-liquidation-stack.ts"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-ethers": "^4.0.6",
+    "@nomicfoundation/hardhat-foundry": "^3.0.0",
+    "@nomicfoundation/hardhat-mocha": "^3.0.13",
+    "@types/node": "^24.0.0",
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.5",
+    "hardhat": "^3.1.12",
+    "mocha": "^11.7.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "packageManager": "pnpm@10.32.1+sha512.a706938f0e89ac1456b6563eab4edf1d1faf3368d1191fc5c59790e96dc918e4456ab2e67d613de1043d2e8c81f87303e6b40d4ffeca9df15ef1ad567348f2be"
+}

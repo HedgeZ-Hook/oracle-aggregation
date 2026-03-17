@@ -38,7 +38,16 @@ library TickCumulativeOracleLib {
         require(lastUpdatedTimestamp >= lastObservation.timestamp, "TCT_IT");
 
         if (lastUpdatedTimestamp == lastObservation.timestamp) {
-            require(tick == lastObservation.tick, "TCT_ITWU");
+            if (tick == lastObservation.tick) {
+                return false;
+            }
+
+            // Reactive timestamps are second-granularity, so multiple swaps from
+            // a busy pool can collapse into the same observed second. In that
+            // case we keep the cumulative value unchanged (dt = 0) and simply
+            // retain the latest tick seen for the current timestamp.
+            self.observations[self.currentObservationIndex].tick = tick;
+            return true;
         }
 
         if (tick == lastObservation.tick) {
