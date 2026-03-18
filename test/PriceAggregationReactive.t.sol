@@ -13,6 +13,8 @@ contract PriceAggregationReactiveTest is Test {
     uint256 internal constant SOURCE_CHAIN_ID = 8453;
     address internal constant POOL_A = address(0x1111);
     address internal constant POOL_B = address(0x2222);
+    address internal constant POOL_C = address(0x3333);
+    address internal constant POOL_D = address(0x4444);
 
     PriceAggregationReactive internal reactive;
 
@@ -38,7 +40,13 @@ contract PriceAggregationReactiveTest is Test {
             weight: 10
         });
 
-        reactive = new PriceAggregationReactive(120, poolConfigs, 0, address(0), 0);
+        reactive = new PriceAggregationReactive(
+            120,
+            poolConfigs,
+            0,
+            address(0),
+            0
+        );
     }
 
     function testAggregateTracksTimeWithoutNewEvents() external {
@@ -109,8 +117,8 @@ contract PriceAggregationReactiveTest is Test {
         assertEq(activePools, 2);
         assertEq(
             priceE18,
-            ((_priceAtTick(120, 18, 6) * 90) +
-                (_priceAtTick(90, 18, 6) * 10)) / 100
+            ((_priceAtTick(120, 18, 6) * 90) + (_priceAtTick(90, 18, 6) * 10)) /
+                100
         );
     }
 
@@ -133,7 +141,9 @@ contract PriceAggregationReactiveTest is Test {
         assertTrue(priceE18 > simpleMean);
     }
 
-    function testAggregateWithSingleActivePoolReturnsThatPoolAndNotReady() external {
+    function testAggregateWithSingleActivePoolReturnsThatPoolAndNotReady()
+        external
+    {
         vm.warp(100);
         reactive.react(_swapLog(POOL_A, 75, 1));
 
@@ -146,7 +156,9 @@ contract PriceAggregationReactiveTest is Test {
         assertEq(priceE18, _priceAtTick(75, 18, 6));
     }
 
-    function testAggregateWithOnlyPoolBActiveReturnsPoolBAndNotReady() external {
+    function testAggregateWithOnlyPoolBActiveReturnsPoolBAndNotReady()
+        external
+    {
         vm.warp(100);
         reactive.react(_swapLog(POOL_B, -90, 1));
 
@@ -216,6 +228,155 @@ contract PriceAggregationReactiveTest is Test {
         );
     }
 
+    function testGasReactSteadyStateOnePool() external {
+        PriceAggregationReactive.PoolConfig[]
+            memory poolConfigs = new PriceAggregationReactive.PoolConfig[](1);
+
+        poolConfigs[0] = PriceAggregationReactive.PoolConfig({
+            sourceChainId: SOURCE_CHAIN_ID,
+            pool: POOL_A,
+            token0Decimals: 18,
+            token1Decimals: 6,
+            useQuoteAsBase: false,
+            weight: 1
+        });
+
+        PriceAggregationReactive reactiveOnePool = new PriceAggregationReactive(
+            120,
+            poolConfigs,
+            0,
+            address(0),
+            0
+        );
+
+        vm.warp(100);
+        for (uint256 i = 0; i < 20; ++i) {
+            reactiveOnePool.react(
+                _swapLogFor(
+                    reactiveOnePool,
+                    POOL_A,
+                    int24(int256(100 + i)),
+                    i + 1
+                )
+            );
+            vm.warp(101 + i);
+        }
+
+        uint256 gasBefore = gasleft();
+        reactiveOnePool.react(_swapLogFor(reactiveOnePool, POOL_A, 140, 21));
+        uint256 gasUsed = gasBefore - gasleft();
+
+        emit log_named_uint("react gas steady state one pool", gasUsed);
+    }
+
+    function testGasReactSteadyStateTwoPools() external {
+        vm.warp(100);
+
+        for (uint256 i = 0; i < 20; ++i) {
+            reactive.react(_swapLog(POOL_A, int24(int256(100 + i)), i + 1));
+            reactive.react(_swapLog(POOL_B, int24(-int256(80 + i)), i + 1));
+            vm.warp(101 + i);
+        }
+
+        uint256 gasBefore = gasleft();
+        reactive.react(_swapLog(POOL_A, 140, 21));
+        uint256 gasUsed = gasBefore - gasleft();
+
+        emit log_named_uint("react gas steady state", gasUsed);
+    }
+
+    function testGasReactSteadyStateFourPools() external {
+        PriceAggregationReactive.PoolConfig[]
+            memory poolConfigs = new PriceAggregationReactive.PoolConfig[](4);
+
+        poolConfigs[0] = PriceAggregationReactive.PoolConfig({
+            sourceChainId: SOURCE_CHAIN_ID,
+            pool: POOL_A,
+            token0Decimals: 18,
+            token1Decimals: 6,
+            useQuoteAsBase: false,
+            weight: 40
+        });
+        poolConfigs[1] = PriceAggregationReactive.PoolConfig({
+            sourceChainId: SOURCE_CHAIN_ID,
+            pool: POOL_B,
+            token0Decimals: 6,
+            token1Decimals: 18,
+            useQuoteAsBase: true,
+            weight: 30
+        });
+        poolConfigs[2] = PriceAggregationReactive.PoolConfig({
+            sourceChainId: SOURCE_CHAIN_ID,
+            pool: POOL_C,
+            token0Decimals: 18,
+            token1Decimals: 6,
+            useQuoteAsBase: false,
+            weight: 20
+        });
+        poolConfigs[3] = PriceAggregationReactive.PoolConfig({
+            sourceChainId: SOURCE_CHAIN_ID,
+            pool: POOL_D,
+            token0Decimals: 6,
+            token1Decimals: 18,
+            useQuoteAsBase: true,
+            weight: 10
+        });
+
+        PriceAggregationReactive reactiveFourPools = new PriceAggregationReactive(
+                120,
+                poolConfigs,
+                0,
+                address(0),
+                0
+            );
+
+        vm.warp(100);
+        for (uint256 i = 0; i < 20; ++i) {
+            uint256 blockNumber = i + 1;
+            reactiveFourPools.react(
+                _swapLogFor(
+                    reactiveFourPools,
+                    POOL_A,
+                    int24(int256(100 + i)),
+                    blockNumber
+                )
+            );
+            reactiveFourPools.react(
+                _swapLogFor(
+                    reactiveFourPools,
+                    POOL_B,
+                    int24(-int256(80 + i)),
+                    blockNumber
+                )
+            );
+            reactiveFourPools.react(
+                _swapLogFor(
+                    reactiveFourPools,
+                    POOL_C,
+                    int24(int256(60 + i)),
+                    blockNumber
+                )
+            );
+            reactiveFourPools.react(
+                _swapLogFor(
+                    reactiveFourPools,
+                    POOL_D,
+                    int24(-int256(40 + i)),
+                    blockNumber
+                )
+            );
+            vm.warp(101 + i);
+        }
+
+        uint256 gasBefore = gasleft();
+        reactiveFourPools.react(
+            _swapLogFor(reactiveFourPools, POOL_A, 140, 21)
+        );
+        uint256 gasUsed = gasBefore - gasleft();
+
+        emit log_named_uint("react gas steady state four pools", gasUsed);
+    }
+
     function _swapLog(
         address pool,
         int24 tick,
@@ -224,6 +385,27 @@ contract PriceAggregationReactiveTest is Test {
         log.chain_id = SOURCE_CHAIN_ID;
         log._contract = pool;
         log.topic_0 = uint256(reactive.V3_SWAP_TOPIC());
+        log.topic_1 = uint256(uint160(address(0xAAAA)));
+        log.topic_2 = uint256(uint160(address(0xBBBB)));
+        log.data = abi.encode(
+            int256(1e18),
+            int256(-1e18),
+            TickMath.getSqrtPriceAtTick(tick),
+            uint128(1e18),
+            tick
+        );
+        log.block_number = blockNumber;
+    }
+
+    function _swapLogFor(
+        PriceAggregationReactive target,
+        address pool,
+        int24 tick,
+        uint256 blockNumber
+    ) internal view returns (IReactive.LogRecord memory log) {
+        log.chain_id = SOURCE_CHAIN_ID;
+        log._contract = pool;
+        log.topic_0 = uint256(target.V3_SWAP_TOPIC());
         log.topic_1 = uint256(uint160(address(0xAAAA)));
         log.topic_2 = uint256(uint160(address(0xBBBB)));
         log.data = abi.encode(

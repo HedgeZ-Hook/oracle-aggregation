@@ -48,6 +48,8 @@ contract PriceAggregationReactive is
     mapping(bytes32 => uint256) internal _poolIndexPlusOne;
     mapping(bytes32 => PoolState) public poolStates;
     mapping(bytes32 => TickCumulativeOracleLib.State) internal _oracles;
+    mapping(bytes32 => TickCumulativeOracleLib.Cursor)
+        internal _defaultIntervalCursors;
 
     event PoolObserved(
         bytes32 indexed poolKey,
@@ -170,7 +172,7 @@ contract PriceAggregationReactive is
             uint256 aggregatePriceE18,
             bool ready,
             uint256 activePools
-        ) = _aggregate(defaultInterval);
+        ) = _aggregateWithDefaultIntervalCursor();
 
         emit PoolObserved(
             poolKey,
@@ -306,6 +308,46 @@ contract PriceAggregationReactive is
         );
     }
 
+    function _aggregateWithDefaultIntervalCursor()
+        internal
+        returns (uint256 aggregatePriceE18, bool ready, uint256 activePools)
+    {
+        uint256 weightedPriceSum;
+        uint256 totalWeight;
+        bool allReady = true;
+
+        for (uint256 i = 0; i < _poolConfigs.length; ++i) {
+            PoolConfig memory cfg = _poolConfigs[i];
+            bytes32 poolKey = _poolKey(cfg);
+            PoolState memory state = poolStates[poolKey];
+            if (!state.initialized) {
+                allReady = false;
+                continue;
+            }
+
+            (
+                uint256 poolPriceE18,
+                bool poolReady
+            ) = _poolPriceWithDefaultIntervalCursor(poolKey);
+            weightedPriceSum += poolPriceE18 * cfg.weight;
+            totalWeight += cfg.weight;
+            activePools++;
+            if (!poolReady) {
+                allReady = false;
+            }
+        }
+
+        if (activePools == 0 || totalWeight == 0) {
+            return (0, false, 0);
+        }
+
+        return (
+            weightedPriceSum / totalWeight,
+            allReady && activePools == _poolConfigs.length,
+            activePools
+        );
+    }
+
     function _resolvedPoolTick(
         bytes32 poolKey,
         uint256 interval
@@ -321,6 +363,47 @@ contract PriceAggregationReactive is
 
         (averageTick, ready) = _oracles[poolKey].calculateAverageTick(
             interval,
+            state.latestTick,
+            state.latestTickTimestamp,
+            _blockTimestamp()
+        );
+        if (!ready) {
+            return (state.latestTick, false);
+        }
+    }
+
+    function _poolPriceWithDefaultIntervalCursor(
+        bytes32 poolKey
+    ) internal returns (uint256 priceE18, bool ready) {
+        PoolConfig memory cfg = _poolConfigByKey(poolKey);
+        (int24 tick, bool hasTwap) = _resolvedPoolTickWithDefaultIntervalCursor(
+            poolKey
+        );
+        return (
+            _priceAtTick(
+                tick,
+                _effectiveBaseDecimals(cfg),
+                _effectiveQuoteDecimals(cfg)
+            ),
+            hasTwap
+        );
+    }
+
+    function _resolvedPoolTickWithDefaultIntervalCursor(
+        bytes32 poolKey
+    ) internal returns (int24 averageTick, bool ready) {
+        PoolState memory state = poolStates[poolKey];
+        if (!state.initialized) {
+            return (0, false);
+        }
+
+        if (defaultInterval == 0) {
+            return (state.latestTick, true);
+        }
+
+        (averageTick, ready) = _oracles[poolKey].calculateAverageTickWithCursor(
+            _defaultIntervalCursors[poolKey],
+            defaultInterval,
             state.latestTick,
             state.latestTickTimestamp,
             _blockTimestamp()

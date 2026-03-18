@@ -25,7 +25,6 @@ contract LiquidationDestinationCallback is AbstractCallback, Ownable {
         uint256 activePools
     );
     event Repriced(bool executed, bool zeroForOne, uint256 usedAmountIn);
-    IVammOracle public oracleContract;
     IVammClearingHouse public clearingHouseContract;
     IVammVault public vaultContract;
     IVammLiquidityController public liquidityControllerContract;
@@ -36,12 +35,14 @@ contract LiquidationDestinationCallback is AbstractCallback, Ownable {
     }
 
     constructor(
-        address _oracleContract,
         address _clearingHouseContract,
+        address _liquidityControllerContract,
         address _callbackSender
     ) payable AbstractCallback(_callbackSender) Ownable(msg.sender) {
-        oracleContract = IVammOracle(_oracleContract);
         clearingHouseContract = IVammClearingHouse(_clearingHouseContract);
+        liquidityControllerContract = IVammLiquidityController(
+            _liquidityControllerContract
+        );
     }
 
     function traderCount() external view returns (uint256) {
@@ -56,10 +57,6 @@ contract LiquidationDestinationCallback is AbstractCallback, Ownable {
 
     function setTraderUpdater(address _traderUpdater) external onlyOwner {
         traderUpdater = _traderUpdater;
-    }
-
-    function setOracleContract(address _oracleContract) external onlyOwner {
-        oracleContract = IVammOracle(_oracleContract);
     }
 
     function setClearingHouseContract(
@@ -114,9 +111,6 @@ contract LiquidationDestinationCallback is AbstractCallback, Ownable {
         uint256 previousOraclePriceE18 = latestOraclePriceE18;
         latestOraclePriceE18 = currentPriceE18;
 
-        if (address(oracleContract) != address(0)) {
-            oracleContract.updateOraclePrice(currentPriceE18);
-        }
         if (address(liquidityControllerContract) != address(0)) {
             try liquidityControllerContract.updateFromOracle() returns (
                 bool executed,
@@ -186,21 +180,6 @@ contract LiquidationDestinationCallback is AbstractCallback, Ownable {
             currentPriceE18,
             activePools
         );
-    }
-
-    function updateOraclePrice(
-        uint256 _priceE18
-    ) external authorizedSenderOnly {
-        latestOraclePriceE18 = _priceE18;
-        if (address(oracleContract) != address(0)) {
-            oracleContract.updateOraclePrice(_priceE18);
-        }
-    }
-
-    function liquidate(address _trader) external authorizedSenderOnly {
-        if (address(clearingHouseContract) != address(0)) {
-            clearingHouseContract.liquidate(_trader);
-        }
     }
 
     function _removeTrader(address trader) internal {

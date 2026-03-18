@@ -9,14 +9,6 @@ import {LiquidationDestinationCallback} from "../src/LiquidationDestinationCallb
 import {PriceAggregationReactive} from "../src/PriceAggregationReactive.sol";
 import {ITraderMonitor} from "../src/interfaces/ITraderMonitor.sol";
 
-contract MockOracle {
-    uint256 public lastPriceE18;
-
-    function updateOraclePrice(uint256 priceE18) external {
-        lastPriceE18 = priceE18;
-    }
-}
-
 contract MockVault {
     mapping(address => bool) public liquidatable;
 
@@ -63,7 +55,6 @@ contract LiquidationFlowTest is Test {
     int24 internal constant ETH_USDC_2980_TICK = -196323;
     int24 internal constant ETH_USDC_2995_TICK = -196273;
 
-    MockOracle internal oracle;
     MockVault internal vault;
     MockClearingHouse internal clearingHouse;
     LiquidationDestinationCallback internal destination;
@@ -72,10 +63,9 @@ contract LiquidationFlowTest is Test {
     function setUp() external {
         vm.chainId(REACTIVE_CHAIN_ID);
 
-        oracle = new MockOracle();
         vault = new MockVault();
         destination = new LiquidationDestinationCallback(
-            address(oracle),
+            address(0),
             address(0),
             SERVICE_ADDR
         );
@@ -163,7 +153,6 @@ contract LiquidationFlowTest is Test {
             activeAfterBOnly
         );
         assertEq(destination.latestOraclePriceE18(), priceAfterBOnly);
-        assertEq(oracle.lastPriceE18(), priceAfterBOnly);
         assertEq(destination.traderCount(), 10);
 
         for (uint256 i = 0; i < 5; ++i) {
@@ -192,7 +181,6 @@ contract LiquidationFlowTest is Test {
             activeAfterABreak
         );
         assertEq(destination.latestOraclePriceE18(), priceAfterABreak);
-        assertEq(oracle.lastPriceE18(), priceAfterABreak);
         assertEq(destination.traderCount(), 5);
 
         for (uint256 i = 0; i < 5; ++i) {
@@ -224,7 +212,7 @@ contract LiquidationFlowTest is Test {
             priceAfterArb,
             activeAfterArb
         );
-        assertEq(oracle.lastPriceE18(), priceAfterArb);
+        assertEq(destination.latestOraclePriceE18(), priceAfterArb);
         assertEq(destination.traderCount(), 5);
     }
 
@@ -261,7 +249,6 @@ contract LiquidationFlowTest is Test {
             activePools
         );
         assertEq(destination.latestOraclePriceE18(), readyPrice);
-        assertEq(oracle.lastPriceE18(), readyPrice);
         assertEq(destination.traderCount(), 2);
         assertEq(destination.liquidationPriceE18(traderA), 3001e18);
         assertEq(destination.liquidationPriceE18(traderB), 2990e18);
