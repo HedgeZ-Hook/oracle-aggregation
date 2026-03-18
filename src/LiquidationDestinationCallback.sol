@@ -2,8 +2,10 @@
 pragma solidity >=0.8.0;
 
 import {AbstractCallback} from "@reactive/abstract-base/AbstractCallback.sol";
+import {IVammLiquidityController} from "./interfaces/IVammLiquidityController.sol";
 import {IVammClearingHouse} from "./interfaces/IVammClearingHouse.sol";
 import {IVammOracle} from "./interfaces/IVammOracle.sol";
+import {IVammVault} from "./interfaces/IVammVault.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 contract LiquidationDestinationCallback is AbstractCallback, Ownable {
@@ -22,8 +24,11 @@ contract LiquidationDestinationCallback is AbstractCallback, Ownable {
         uint256 latestOraclePriceE18,
         uint256 activePools
     );
+    event Repriced(bool executed, bool zeroForOne, uint256 usedAmountIn);
     IVammOracle public oracleContract;
     IVammClearingHouse public clearingHouseContract;
+    IVammVault public vaultContract;
+    IVammLiquidityController public liquidityControllerContract;
 
     modifier onlyClearingHouse() {
         require(msg.sender == address(clearingHouseContract), "bad sender");
@@ -63,6 +68,18 @@ contract LiquidationDestinationCallback is AbstractCallback, Ownable {
         clearingHouseContract = IVammClearingHouse(_clearingHouseContract);
     }
 
+    function setVaultContract(address _vaultContract) external onlyOwner {
+        vaultContract = IVammVault(_vaultContract);
+    }
+
+    function setLiquidityControllerContract(
+        address _liquidityControllerContract
+    ) external onlyOwner {
+        liquidityControllerContract = IVammLiquidityController(
+            _liquidityControllerContract
+        );
+    }
+
     function updateTrader(
         address trader,
         uint256 liquidationPrice,
@@ -97,6 +114,21 @@ contract LiquidationDestinationCallback is AbstractCallback, Ownable {
         uint256 previousOraclePriceE18 = latestOraclePriceE18;
         latestOraclePriceE18 = currentPriceE18;
 
+        if (address(oracleContract) != address(0)) {
+            oracleContract.updateOraclePrice(currentPriceE18);
+        }
+        if (address(liquidityControllerContract) != address(0)) {
+            try liquidityControllerContract.updateFromOracle() returns (
+                bool executed,
+                bool zeroForOne,
+                uint256 usedAmountIn
+            ) {
+                emit Repriced(executed, zeroForOne, usedAmountIn);
+            } catch {
+                emit Repriced(false, false, 0);
+            }
+        }
+
         // @dev: Since it is just demo, so this function can be inefficient,
         // in production, we have to find another way for fetching liquidated users
         // Ex: It can be implementing balanced sorted tree for quick searching
@@ -105,8 +137,13 @@ contract LiquidationDestinationCallback is AbstractCallback, Ownable {
         uint256 i = 0;
         while (i < traders.length) {
             address trader = traders[i];
-            uint256 liquidationPrice = liquidationPriceE18[trader];
-            if (liquidationPrice == 0 || liquidationPrice <= currentPriceE18) {
+            if (address(vaultContract) == address(0)) {
+                unchecked {
+                    ++i;
+                }
+                continue;
+            }
+            if (!vaultContract.isLiquidatable(trader)) {
                 unchecked {
                     ++i;
                 }
@@ -114,17 +151,35 @@ contract LiquidationDestinationCallback is AbstractCallback, Ownable {
             }
 
             if (address(clearingHouseContract) != address(0)) {
-                (bool liquidated, , ) = clearingHouseContract.liquidate(trader);
-
-                if (liquidated) {
-                    _removeTrader(trader);
+                bool isFullyLiquidated;
+                try clearingHouseContract.liquidate(trader) returns (
+                    bool liquidated,
+                    uint256,
+                    uint256
+                ) {
+                    isFullyLiquidated = liquidated;
+                } catch {
+                    unchecked {
+                        ++i;
+                    }
+                    continue;
                 }
+
+                if (isFullyLiquidated) {
+                    if (i < traders.length && traders[i] == trader) {
+                        unchecked {
+                            ++i;
+                        }
+                    }
+                    continue;
+                }
+            }
+
+            unchecked {
+                ++i;
             }
         }
 
-        if (address(oracleContract) != address(0)) {
-            oracleContract.updateOraclePrice(currentPriceE18);
-        }
         emit OraclePriceUpdated(
             aggregator,
             previousOraclePriceE18,

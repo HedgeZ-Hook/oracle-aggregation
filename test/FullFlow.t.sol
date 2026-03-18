@@ -7,13 +7,48 @@ import {IReactive} from "@reactive/interfaces/IReactive.sol";
 import {TickMath} from "../src/libraries/TickMath.sol";
 import {LiquidationDestinationCallback} from "../src/LiquidationDestinationCallback.sol";
 import {PriceAggregationReactive} from "../src/PriceAggregationReactive.sol";
-import {MockClearingHouse} from "../src/mocks/MockClearingHouse.sol";
+import {ITraderMonitor} from "../src/interfaces/ITraderMonitor.sol";
 
 contract MockOracle {
     uint256 public lastPriceE18;
 
     function updateOraclePrice(uint256 priceE18) external {
         lastPriceE18 = priceE18;
+    }
+}
+
+contract MockVault {
+    mapping(address => bool) public liquidatable;
+
+    function setLiquidatable(address trader, bool value) external {
+        liquidatable[trader] = value;
+    }
+
+    function isLiquidatable(address trader) external view returns (bool) {
+        return liquidatable[trader];
+    }
+}
+
+contract MockClearingHouse {
+    ITraderMonitor public traderMonitor;
+
+    constructor(address _traderMonitor) {
+        traderMonitor = ITraderMonitor(_traderMonitor);
+    }
+
+    function updateTrader(
+        address trader,
+        uint256 liquidationPrice,
+        bool isLiquidated
+    ) external {
+        traderMonitor.updateTrader(trader, liquidationPrice, isLiquidated);
+    }
+
+    function liquidate(
+        address trader
+    ) external returns (bool, uint256, uint256) {
+        traderMonitor.updateTrader(trader, 0, true);
+        return (true, 0, 0);
     }
 }
 
@@ -29,6 +64,7 @@ contract LiquidationFlowTest is Test {
     int24 internal constant ETH_USDC_2995_TICK = -196273;
 
     MockOracle internal oracle;
+    MockVault internal vault;
     MockClearingHouse internal clearingHouse;
     LiquidationDestinationCallback internal destination;
     PriceAggregationReactive internal aggregator;
@@ -37,6 +73,7 @@ contract LiquidationFlowTest is Test {
         vm.chainId(REACTIVE_CHAIN_ID);
 
         oracle = new MockOracle();
+        vault = new MockVault();
         destination = new LiquidationDestinationCallback(
             address(oracle),
             address(0),
@@ -44,6 +81,7 @@ contract LiquidationFlowTest is Test {
         );
         clearingHouse = new MockClearingHouse(address(destination));
         destination.setClearingHouseContract(address(clearingHouse));
+        destination.setVaultContract(address(vault));
 
         PriceAggregationReactive.PoolConfig[]
             memory poolConfigs = new PriceAggregationReactive.PoolConfig[](2);
@@ -97,9 +135,11 @@ contract LiquidationFlowTest is Test {
 
         for (uint256 i = 0; i < 5; ++i) {
             clearingHouse.updateTrader(traders_[i], 3001e18, false);
+            vault.setLiquidatable(traders_[i], false);
         }
         for (uint256 i = 5; i < 10; ++i) {
             clearingHouse.updateTrader(traders_[i], 2990e18, false);
+            vault.setLiquidatable(traders_[i], false);
         }
         assertEq(destination.traderCount(), 10);
 
@@ -125,6 +165,10 @@ contract LiquidationFlowTest is Test {
         assertEq(destination.latestOraclePriceE18(), priceAfterBOnly);
         assertEq(oracle.lastPriceE18(), priceAfterBOnly);
         assertEq(destination.traderCount(), 10);
+
+        for (uint256 i = 0; i < 5; ++i) {
+            vault.setLiquidatable(traders_[i], true);
+        }
 
         vm.warp(102);
         aggregator.react(_swapLog(POOL_A, ETH_USDC_2995_TICK, 3));
@@ -194,6 +238,8 @@ contract LiquidationFlowTest is Test {
 
         clearingHouse.updateTrader(traderA, 3001e18, false);
         clearingHouse.updateTrader(traderB, 2990e18, false);
+        vault.setLiquidatable(traderA, false);
+        vault.setLiquidatable(traderB, false);
 
         vm.warp(221);
         aggregator.react(_swapLog(POOL_A, ETH_USDC_2995_TICK, 2));
