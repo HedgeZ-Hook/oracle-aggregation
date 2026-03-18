@@ -6,12 +6,12 @@ async function main() {
     separatorIndex >= 0 ? process.argv.slice(separatorIndex + 1) : [];
   const destinationAddress =
     cliArgs[0] || "0x2c4FC7a951c8182e7b2e18BfEb70930D2E96b74d";
-  const clearingHouseAddress =
-    cliArgs[1] || "0xE51C0075886B78C7a9FFb48ca29075611a89c96d";
+  const vaultContractAddress =
+    cliArgs[1] || "0x8d8d238ac27859a61debeeca4bbd4a4598cbbf8d";
 
-  if (!destinationAddress || !clearingHouseAddress) {
+  if (!destinationAddress || !vaultContractAddress) {
     throw new Error(
-      "Usage: npx hardhat run scripts/set-clearing-house.ts --network unichainSepolia -- <destination> <clearingHouse>",
+      "Usage: npx hardhat run scripts/set-vault-contract.ts --network unichainSepolia -- <destination> <vault>",
     );
   }
 
@@ -23,11 +23,11 @@ async function main() {
     destinationAddress,
   );
 
-  const tx = await destination.setClearingHouseContract(clearingHouseAddress);
+  const tx = await destination.setVaultContract(vaultContractAddress);
   await tx.wait();
 
   console.log("LiquidationDestinationCallback:", destinationAddress);
-  console.log("clearingHouseContract:", clearingHouseAddress);
+  console.log("Vault Contract:", vaultContractAddress);
   console.log("txHash:", tx.hash);
 }
 

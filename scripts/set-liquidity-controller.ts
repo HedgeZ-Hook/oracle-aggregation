@@ -1,12 +1,17 @@
 import hre from "hardhat";
 
 async function main() {
-  const destinationAddress = process.argv[2];
-  const liquidityControllerAddress = process.argv[3];
+  const separatorIndex = process.argv.indexOf("--");
+  const cliArgs =
+    separatorIndex >= 0 ? process.argv.slice(separatorIndex + 1) : [];
+  const destinationAddress =
+    cliArgs[0] || "0x2c4FC7a951c8182e7b2e18BfEb70930D2E96b74d";
+  const liquidityControllerAddress =
+    cliArgs[1] || "0xaDa34B52112C682E9b5d783f1B664b2cf8976dfE";
 
   if (!destinationAddress || !liquidityControllerAddress) {
     throw new Error(
-      "Usage: npx hardhat run scripts/set-liquidity-controller.ts -- <destination> <liquidityController>",
+      "Usage: npx hardhat run scripts/set-liquidity-controller.ts --network unichainSepolia -- <destination> <liquidityController>",
     );
   }
 
