@@ -5,56 +5,54 @@ Event-driven oracle aggregation and liquidation automation built for the Reactiv
 The current codebase focuses on:
 
 - a V3-only price aggregator that listens to Uniswap V3 `Swap` events across chains
-- a liquidation monitor that tracks trader liquidation thresholds
-- a destination callback that updates the destination oracle and triggers liquidation callbacks
+- a destination callback contract on Unichain that stores trader liquidation thresholds
+- a direct callback path from the aggregator into the destination liquidation contract
 
 ## Architecture
 
 ```text
 +------------------------------------------------------------+
 | Uniswap V3 Pools                                           |
-| Ethereum / Base / ...                                      |
+| Ethereum / Base / Sepolia / ...                            |
 | Event: Swap(address,address,int256,int256,uint160,uint128,int24) |
 +------------------------------------------------------------+
                              |
                              v
 +------------------------------------------------------------+
 | PriceAggregationReactive                                   |
+| Lasna                                                      |
 | - normalize per-pool tick direction                        |
 | - maintain per-pool tick cumulative                        |
 | - compute weighted aggregate price                         |
 +------------------------------------------------------------+
                              |
-                             | Callback: onAggregatedPrice(address,uint256,uint256)
+                             | Callback: onAggregatedPrice(address,address,uint256,uint256)
                              v
 +------------------------------------------------------------+
-| LiquidationMonitorReactive                                 |
-| - track trader liquidation thresholds                      |
-| - compare liquidationPrice vs aggregate price              |
-| - emit destination callbacks                               |
+| LiquidationDestinationCallback                             |
+| Unichain Sepolia                                           |
+| - verify trusted aggregator                                |
+| - store latestOraclePriceE18                               |
+| - track liquidationPriceE18 per trader                     |
+| - optionally call liquidity controller                     |
+| - liquidate through clearing house when vault says so      |
 +------------------------------------------------------------+
-             ^                                       |
-             |                                       |
-             | LiquidationPriceChange(address,uint256,bool)
-             |                                       | Callback: updateOraclePrice(uint256)
-+-------------------------------+                    | Callback: liquidate(address)
-| Trader Source Contract        |                    v
-+-------------------------------+  +--------------------------------------------------+
-                                  | LiquidationDestinationCallback                    |
-                                  | - update destination oracle                      |
-                                  | - call destination clearing house liquidation    |
-                                  +--------------------------------------------------+
+             ^
+             |
+             | updateTrader(address,uint256,bool)
++-------------------------------+
+| Clearing House / Local Caller |
++-------------------------------+
 ```
 
 ```mermaid
 flowchart TD
-    A[Uniswap V3 Pools<br/>Swap events] --> B[PriceAggregationReactive]
-    T[Trader Source Contract<br/>LiquidationPriceChange] --> C[LiquidationMonitorReactive]
-    B -->|onAggregatedPrice| C
-    C -->|updateOraclePrice| D[LiquidationDestinationCallback]
-    C -->|liquidate| D
-    D --> E[Destination Oracle]
-    D --> F[Destination Clearing House]
+    A[Uniswap V3 Pools<br/>Swap events] --> B[PriceAggregationReactive<br/>Lasna]
+    B -->|onAggregatedPrice| C[LiquidationDestinationCallback<br/>Unichain Sepolia]
+    D[Clearing House / Local Caller<br/>updateTrader] --> C
+    C --> E[Vault]
+    C --> F[Liquidity Controller]
+    C --> G[Clearing House]
 ```
 
 ## Contracts
@@ -72,7 +70,7 @@ Responsibilities:
   - `useQuoteAsBase`
 - maintains per-pool `tick cumulative`
 - computes weighted aggregate price across active pools
-- emits a callback when the aggregate price changes
+- emits a direct callback to the Unichain destination callback contract when the aggregate price changes
 
 Notes:
 
@@ -80,37 +78,37 @@ Notes:
 - `ready` means every configured pool has enough history for the configured TWAP interval
 - timestamps are taken from the Reactive execution environment, not from the source chain block timestamp
 
-### `LiquidationMonitorReactive`
-
-File: [src/LiquidationMonitorReactive.sol](/Users/perfogic/Workspace/Evm/oracle-aggregation/src/LiquidationMonitorReactive.sol)
-
-Responsibilities:
-
-- subscribes to `LiquidationPriceChange(address,uint256,bool)` from the trader source contract
-- stores trader liquidation thresholds
-- receives aggregate price updates from `PriceAggregationReactive`
-- emits destination callbacks for:
-  - `updateOraclePrice(uint256)`
-  - `liquidate(address)`
-- removes a trader when the source emits:
-  - `LiquidationPriceChange(trader, 0, true)`
-
-Semantics:
-
-- liquidation is requested when `liquidationPriceE18 > currentPriceE18`
-- `sourceContract` and `priceAggregationContract` are intentionally different trust boundaries:
-  - `sourceContract` emits trader threshold updates
-  - `priceAggregationContract` is the only contract allowed to call `onAggregatedPrice(...)`
-
 ### `LiquidationDestinationCallback`
 
 File: [src/LiquidationDestinationCallback.sol](/Users/perfogic/Workspace/Evm/oracle-aggregation/src/LiquidationDestinationCallback.sol)
 
 Responsibilities:
 
-- receives authorized callbacks from the Reactive side
-- forwards `updateOraclePrice(uint256)` to the destination oracle
-- forwards `liquidate(address)` to the destination clearing house
+- receives authorized callbacks from the Reactive callback proxy on Unichain
+- verifies the trusted aggregator encoded in the callback payload
+- stores `latestOraclePriceE18`
+- stores tracked traders and their `liquidationPriceE18`
+- optionally calls `liquidityControllerContract.updateFromOracle()`
+- checks `vaultContract.isLiquidatable(trader)`
+- calls `clearingHouseContract.liquidate(trader)` and removes fully liquidated traders
+
+Key entrypoints:
+
+- `updateTrader(address trader, uint256 liquidationPrice, bool isLiquidated)`
+  - called by the configured clearing house
+  - updates or removes tracked traders
+- `onAggregatedPrice(address rvmId, address aggregator, uint256 currentPriceE18, uint256 activePools)`
+  - called through the Reactive callback proxy
+  - updates `latestOraclePriceE18`
+  - optionally reprices through the liquidity controller
+  - scans tracked traders and liquidates when the vault says they are liquidatable
+
+Supporting mocks and interfaces:
+
+- [src/mocks/MockClearingHouse.sol](/Users/perfogic/Workspace/Evm/oracle-aggregation/src/mocks/MockClearingHouse.sol)
+- [src/interfaces/IVammClearingHouse.sol](/Users/perfogic/Workspace/Evm/oracle-aggregation/src/interfaces/IVammClearingHouse.sol)
+- [src/interfaces/IVammVault.sol](/Users/perfogic/Workspace/Evm/oracle-aggregation/src/interfaces/IVammVault.sol)
+- [src/interfaces/IVammLiquidityController.sol](/Users/perfogic/Workspace/Evm/oracle-aggregation/src/interfaces/IVammLiquidityController.sol)
 
 ## Price Model
 
@@ -158,6 +156,9 @@ Mainnet and testnet network params in the current Hardhat config:
   - RPC: `https://lasna-rpc.rnk.dev/`
   - Chain ID: `5318007`
   - Explorer: `https://lasna.reactscan.net`
+- Unichain Sepolia
+  - RPC: `https://sepolia.unichain.org`
+  - Chain ID: `1301`
 
 ## Tooling
 
@@ -205,7 +206,7 @@ Required env:
 
 ```bash
 export PRIVATE_KEY=...
-export CALLBACK_TARGET=0xYourMonitor
+export CALLBACK_TARGET=0xYourDestinationCallback
 ```
 
 Optional env:
@@ -229,33 +230,52 @@ Deploy to Lasna:
 npx hardhat run scripts/deploy-price-aggregation.ts --network lasna
 ```
 
-### Deploy full liquidation stack
+### Deploy full liquidation flow
 
-Script: [scripts/deploy-liquidation-stack.ts](/Users/perfogic/Workspace/Evm/oracle-aggregation/scripts/deploy-liquidation-stack.ts)
+Script: [scripts/deploy-full-flow.ts](/Users/perfogic/Workspace/Evm/oracle-aggregation/scripts/deploy-full-flow.ts)
+
+This script deploys:
+
+1. `LiquidationDestinationCallback` on Unichain Sepolia
+2. `MockClearingHouse` on Unichain Sepolia
+3. sets `destination.clearingHouseContract`
+4. `PriceAggregationReactive` on Lasna
+5. sets `destination.trustedAggregator`
 
 Required env:
 
 ```bash
 export PRIVATE_KEY=...
-export TRADER_SOURCE_CHAIN_ID=8453
-export TRADER_SOURCE_CONTRACT=0xYourTraderSource
-export REACTIVE_CHAIN_ID=1597
 ```
 
 Optional env:
 
 ```bash
-export DEFAULT_INTERVAL=900
-export AGGREGATOR_CALLBACK_GAS_LIMIT=400000
-export LIQUIDATION_EXECUTOR_GAS_LIMIT=300000
-export EXECUTOR_CALLBACK_SENDER=0x0000000000000000000000000000000000fffFfF
 export DEPLOY_VALUE_WEI=0
 ```
 
 Deploy:
 
 ```bash
-npx hardhat run scripts/deploy-liquidation-stack.ts --network reactiveMainnet
+npx hardhat run scripts/deploy-full-flow.ts
+```
+
+### Update destination addresses
+
+Set `clearingHouseContract` on Unichain:
+
+Script: [scripts/set-clearing-house.ts](/Users/perfogic/Workspace/Evm/oracle-aggregation/scripts/set-clearing-house.ts)
+
+```bash
+npx hardhat run scripts/set-clearing-house.ts -- 0xDestination 0xClearingHouse
+```
+
+Set `liquidityControllerContract` on Unichain:
+
+Script: [scripts/set-liquidity-controller.ts](/Users/perfogic/Workspace/Evm/oracle-aggregation/scripts/set-liquidity-controller.ts)
+
+```bash
+npx hardhat run scripts/set-liquidity-controller.ts -- 0xDestination 0xLiquidityController
 ```
 
 ## Important Operational Notes
@@ -266,14 +286,15 @@ npx hardhat run scripts/deploy-liquidation-stack.ts --network reactiveMainnet
   A pool becomes active on first observation, but only becomes ready after enough time has elapsed.
 - same-second burst swaps can happen on active pools.
   The oracle library now overwrites the latest tick for zero-delta timestamps instead of reverting.
-- the liquidation monitor no longer depends on a destination-side success subscription to remove users.
-  Trader removal is driven by the source-side `LiquidationPriceChange(trader, 0, true)` event.
+- the first callback argument is overwritten by Reactive with the `rvmId`.
+  If you need the source aggregator address, reserve the first arg and pass the aggregator address as the second arg.
+- callback destination contracts must be funded on the destination chain and may need `coverDebt()` depending on callback execution state.
 
 ## Repository Layout
 
 - [src/PriceAggregationReactive.sol](/Users/perfogic/Workspace/Evm/oracle-aggregation/src/PriceAggregationReactive.sol)
-- [src/LiquidationMonitorReactive.sol](/Users/perfogic/Workspace/Evm/oracle-aggregation/src/LiquidationMonitorReactive.sol)
 - [src/LiquidationDestinationCallback.sol](/Users/perfogic/Workspace/Evm/oracle-aggregation/src/LiquidationDestinationCallback.sol)
+- [src/mocks/MockClearingHouse.sol](/Users/perfogic/Workspace/Evm/oracle-aggregation/src/mocks/MockClearingHouse.sol)
 - [src/twap/TickCumulativeOracleLib.sol](/Users/perfogic/Workspace/Evm/oracle-aggregation/src/twap/TickCumulativeOracleLib.sol)
 - [test/PriceAggregationReactive.t.sol](/Users/perfogic/Workspace/Evm/oracle-aggregation/test/PriceAggregationReactive.t.sol)
 - [test/FullFlow.t.sol](/Users/perfogic/Workspace/Evm/oracle-aggregation/test/FullFlow.t.sol)
