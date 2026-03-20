@@ -22,7 +22,7 @@ const DEFAULT_MIN_USDT_BALANCE = "1000";
 const DEFAULT_TOPUP_USDT = "10000";
 const DEFAULT_MIN_WETH_BALANCE = "0.6";
 const DEFAULT_TOPUP_WETH = "2.0";
-const DEFAULT_SWAP_INTERVAL_MS = 60_000;
+const DEFAULT_SWAP_INTERVAL_MS = 10_000;
 const MIN_SWAP_SCALE = new Decimal("0.125");
 const ERC20_ALLOWANCE_ABI = [
   ...ERC20_ABI,
@@ -133,6 +133,23 @@ export async function makeRuntime(ethers: HardhatEthersHelpers) {
     if (wethAllowance < topUpWeth) {
       await (await weth.approve(deployment.swapRouter, MaxUint256)).wait();
     }
+  }
+
+  async function readBalances() {
+    const owner = await deployer.getAddress();
+    const [usdtBalance, wethBalance] = await Promise.all([
+      usdt.balanceOf(owner),
+      weth.balanceOf(owner),
+    ]);
+
+    return {
+      usdt: new Decimal(usdtBalance.toString()).div(
+        new Decimal(10).pow(deployment.quoteDecimals),
+      ),
+      weth: new Decimal(wethBalance.toString()).div(
+        new Decimal(10).pow(deployment.baseDecimals),
+      ),
+    };
   }
 
   async function swapVolumeCycle() {
@@ -256,6 +273,7 @@ export async function makeRuntime(ethers: HardhatEthersHelpers) {
     ensureBalances,
     ensurePoolExists,
     readPrice,
+    readBalances,
     swapVolumeCycle,
     exactInputSingleSafe,
   };
@@ -277,4 +295,47 @@ export function sleep(ms: number) {
 
 export function loopIntervalMs(): number {
   return DEFAULT_SWAP_INTERVAL_MS;
+}
+
+export function printHeader(
+  title: string,
+  details: Record<string, string | number>,
+) {
+  console.log(`\n=== ${title} ===`);
+  for (const [key, value] of Object.entries(details)) {
+    console.log(`${key}: ${value}`);
+  }
+  console.log("");
+}
+
+export function printSwapSummary(details: Record<string, string | number>) {
+  console.log("--- Swap Summary ---");
+  for (const [key, value] of Object.entries(details)) {
+    console.log(`${key}: ${value}`);
+  }
+  console.log("--------------------\n");
+}
+
+const ANSI = {
+  reset: "\x1b[0m",
+  bold: "\x1b[1m",
+  cyan: "\x1b[36m",
+  yellow: "\x1b[33m",
+  green: "\x1b[32m",
+  magenta: "\x1b[35m",
+} as const;
+
+export function printTradeLine(params: {
+  direction: string;
+  amountLabel: string;
+  amountValue: string;
+  priceBefore: string;
+  priceAfter: string;
+}) {
+  console.log(
+    `${ANSI.bold}${ANSI.cyan}${params.direction}${ANSI.reset}  ` +
+      `${ANSI.yellow}${params.amountLabel}${ANSI.reset}: ${ANSI.bold}${params.amountValue}${ANSI.reset}  ` +
+      `${ANSI.magenta}priceBefore${ANSI.reset}: ${params.priceBefore}  ` +
+      `${ANSI.green}priceAfter${ANSI.reset}: ${params.priceAfter}`,
+  );
 }

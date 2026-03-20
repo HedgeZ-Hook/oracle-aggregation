@@ -18,8 +18,8 @@ export const DEFAULT_LP_ETH = "2.0";
 export const DEFAULT_LP_USDT = "4600";
 export const DEFAULT_SWAP_WETH_BUDGET = "3.0";
 export const DEFAULT_SWAP_USDT_BUDGET = "12000";
-export const DEFAULT_RANDOM_ETH_MIN = "0.1";
-export const DEFAULT_RANDOM_ETH_MAX = "0.25";
+export const DEFAULT_RANDOM_ETH_MIN = "0.025";
+export const DEFAULT_RANDOM_ETH_MAX = "0.05";
 
 export const ERC20_ABI = [
   "function approve(address spender, uint256 amount) external returns (bool)",
