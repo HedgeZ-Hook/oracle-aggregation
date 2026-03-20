@@ -5,9 +5,9 @@ async function main() {
   const cliArgs =
     separatorIndex >= 0 ? process.argv.slice(separatorIndex + 1) : [];
   const destinationAddress =
-    cliArgs[0] || "0x2c4FC7a951c8182e7b2e18BfEb70930D2E96b74d";
+    cliArgs[0] || "0xE6D19cBA9e4c978688dfbFEf1D63805e4f3D71Be";
   const clearingHouseAddress =
-    cliArgs[1] || "0xE51C0075886B78C7a9FFb48ca29075611a89c96d";
+    cliArgs[1] || "0xa6a32f26eB837f4c9636688812efDef1Aa3ac8a6";
 
   if (!destinationAddress || !clearingHouseAddress) {
     throw new Error(

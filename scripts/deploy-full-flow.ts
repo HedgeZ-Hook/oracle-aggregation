@@ -48,26 +48,29 @@ async function main() {
   const destinationFactory = await uniEthers.getContractFactory(
     "LiquidationDestinationCallback",
   );
-  const destination = await destinationFactory.deploy(
-    uniEthers.ZeroAddress,
-    uniEthers.ZeroAddress,
-    UNICHAIN_SEPOLIA_CALLBACK_SENDER,
-    {
-      value: destinationDeployValue,
-    },
+  // const destination = await destinationFactory.deploy(
+  //   uniEthers.ZeroAddress,
+  //   uniEthers.ZeroAddress,
+  //   UNICHAIN_SEPOLIA_CALLBACK_SENDER,
+  //   {
+  //     value: destinationDeployValue,
+  //   },
+  // );
+  const destination = destinationFactory.attach(
+    "0xE6D19cBA9e4c978688dfbFEf1D63805e4f3D71Be",
   );
-  await destination.waitForDeployment();
+  // await destination.waitForDeployment();
   const destinationAddress = await destination.getAddress();
 
-  const clearingHouseFactory =
-    await uniEthers.getContractFactory("MockClearingHouse");
-  const clearingHouse = await clearingHouseFactory.deploy(destinationAddress);
-  await clearingHouse.waitForDeployment();
-  const clearingHouseAddress = await clearingHouse.getAddress();
+  // const clearingHouseFactory =
+  // await uniEthers.getContractFactory("MockClearingHouse");
+  // const clearingHouse = await clearingHouseFactory.deploy(destinationAddress);
+  // await clearingHouse.waitForDeployment();
+  // const clearingHouseAddress = await clearingHouse.getAddress();
 
-  const setClearingHouseTx =
-    await destination.setClearingHouseContract(clearingHouseAddress);
-  await setClearingHouseTx.wait();
+  // const setClearingHouseTx =
+  // await destination.setClearingHouseContract(clearingHouseAddress);
+  // await setClearingHouseTx.wait();
 
   const deployValue = optionalBigInt("DEPLOY_VALUE_WEI", 5n * 10n ** 18n);
 
@@ -93,8 +96,8 @@ async function main() {
   console.log("  chainId:", uniNetwork.chainId.toString());
   console.log("  LiquidationDestinationCallback:", destinationAddress);
   console.log("  callbackSender:", UNICHAIN_SEPOLIA_CALLBACK_SENDER);
-  console.log("  MockClearingHouse:", clearingHouseAddress);
-  console.log("  destination.clearingHouseContract:", clearingHouseAddress);
+  // console.log("  MockClearingHouse:", clearingHouseAddress);
+  // console.log("  destination.clearingHouseContract:", clearingHouseAddress);
   console.log("  destination.trustedAggregator:", aggregationAddress);
   console.log("Lasna:");
   console.log("  chainId:", lasnaNetwork.chainId.toString());

@@ -5,9 +5,9 @@ async function main() {
   const cliArgs =
     separatorIndex >= 0 ? process.argv.slice(separatorIndex + 1) : [];
   const destinationAddress =
-    cliArgs[0] || "0x2c4FC7a951c8182e7b2e18BfEb70930D2E96b74d";
+    cliArgs[0] || "0xE6D19cBA9e4c978688dfbFEf1D63805e4f3D71Be";
   const liquidityControllerAddress =
-    cliArgs[1] || "0xaDa34B52112C682E9b5d783f1B664b2cf8976dfE";
+    cliArgs[1] || "0x622c85D16de8A4976865425B2C87558482bD02ad";
 
   if (!destinationAddress || !liquidityControllerAddress) {
     throw new Error(

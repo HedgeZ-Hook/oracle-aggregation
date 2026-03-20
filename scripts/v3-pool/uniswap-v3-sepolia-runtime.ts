@@ -261,9 +261,12 @@ export async function makeRuntime(ethers: HardhatEthersHelpers) {
   };
 }
 
-export function randomEthAmount(): Decimal {
-  const min = new Decimal(DEFAULT_RANDOM_ETH_MIN);
-  const max = new Decimal(DEFAULT_RANDOM_ETH_MAX);
+export function randomEthAmount(
+  min = new Decimal(DEFAULT_RANDOM_ETH_MIN),
+  max = new Decimal(DEFAULT_RANDOM_ETH_MAX),
+): Decimal {
+  // const min = new Decimal(DEFAULT_RANDOM_ETH_MIN);
+  // const max = new Decimal(DEFAULT_RANDOM_ETH_MAX);
   const ratio = new Decimal(Math.random().toString());
   return min.plus(max.minus(min).mul(ratio));
 }

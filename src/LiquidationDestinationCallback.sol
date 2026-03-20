@@ -25,6 +25,9 @@ contract LiquidationDestinationCallback is AbstractCallback, Ownable {
         uint256 activePools
     );
     event Repriced(bool executed, bool zeroForOne, uint256 usedAmountIn);
+    event RepriceFailed(string reason);
+    event RepriceFailedPanic(uint256 code);
+    event RepriceFailedBytes(bytes data);
     IVammClearingHouse public clearingHouseContract;
     IVammVault public vaultContract;
     IVammLiquidityController public liquidityControllerContract;
@@ -118,8 +121,15 @@ contract LiquidationDestinationCallback is AbstractCallback, Ownable {
                 uint256 usedAmountIn
             ) {
                 emit Repriced(executed, zeroForOne, usedAmountIn);
-            } catch {
+            } catch Error(string memory reason) {
                 emit Repriced(false, false, 0);
+                emit RepriceFailed(reason);
+            } catch Panic(uint256 code) {
+                emit Repriced(false, false, 0);
+                emit RepriceFailedPanic(code);
+            } catch (bytes memory data) {
+                emit Repriced(false, false, 0);
+                emit RepriceFailedBytes(data);
             }
         }
 
